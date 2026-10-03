@@ -66,6 +66,9 @@ Whenever modifying code in `src/`, preserve these core rules:
 5. **Preserve Cross-Browser Compatibility**:
    - Custom scrollbars must include both standard CSS (`scrollbar-width: thin; scrollbar-color: ...`) for Firefox and `::-webkit-scrollbar` for Chromium.
    - Storage operations must use the safe storage adapter (`storage.js`) supporting Chrome callback and Firefox Promise APIs.
+6. **Git Safety & Permission Policy (CRITICAL)**:
+   - **NEVER** run `git commit`, `git tag`, or `git push` without an explicit request or permission from the user.
+   - Always prepare changes, run verification checks, and show the proposed commit message or tag command to the user. Wait for user confirmation before executing any Git write operations.
 
 ---
 
@@ -93,6 +96,11 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 ## 5. Release & Tagging Procedure (How to Publish)
 
 The repository has an automated GitHub Actions pipeline ([`.github/workflows/release.yml`](.github/workflows/release.yml)) that builds, packages, and attaches `chrome.zip` and `firefox.zip` to a new GitHub Release.
+
+> [!CAUTION]
+> **EXPLICIT USER PERMISSION REQUIRED FOR GIT WRITE OPERATIONS**:
+> AI assistants must **never** run `git commit`, `git tag`, or `git push` autonomously.
+> Always prepare the file changes, run verification, show the proposed commit/tag message to the user, and wait for their explicit permission before running any Git write commands.
 
 ### Step-by-Step Release Flow for Agents:
 

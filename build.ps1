@@ -62,9 +62,26 @@ function Create-ExtensionZip {
         }
     }
     
-    # 5. Zip the contents of the temp folder
-    if (Test-Path $zipName) { Remove-Item $zipName }
-    Compress-Archive -Path "$tempFolder/*" -DestinationPath $zipName
+    # 5. Zip the contents of the temp folder with guaranteed forward-slash paths (store compliant)
+    if (Test-Path $zipName) { Remove-Item $zipName -Force }
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+    $currentDir = (Resolve-Path .).Path
+    $zipFullPath = Join-Path $currentDir $zipName
+    $zipArchive = [System.IO.Compression.ZipFile]::Open($zipFullPath, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $tempFolderFull = (Resolve-Path $tempFolder).Path
+        Get-ChildItem -Path $tempFolderFull -Recurse -File | ForEach-Object {
+            $relPath = $_.FullName.Substring($tempFolderFull.Length).TrimStart('\', '/')
+            # CRITICAL: Web store validators (Chrome Web Store & AMO) require forward slashes ('/').
+            # Windows backslashes ('\') cause "Invalid file name in archive: icons\icon128.png".
+            $entryName = $relPath -replace '\\', '/'
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zipArchive, $_.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    } finally {
+        $zipArchive.Dispose()
+    }
     
     # 6. Clean up the temporary folder
     Remove-Item -Path $tempFolder -Recurse -Force

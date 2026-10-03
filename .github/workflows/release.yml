@@ -73,20 +73,44 @@ jobs:
               $tag = "v$($manifest.version)"
           }
 
-          # 2. Determine Title
+          # 2. Extract Tag Annotation Message if available
+          $tagMsg = ""
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+              $rawMsg = git tag -l --format='%(contents)' $tag
+              if ($rawMsg) {
+                  $tagMsg = $rawMsg.Trim()
+              }
+          }
+
+          # 3. Determine Title & Notes
           $inputTitle = "${{ inputs.release_title }}".Trim()
+          $inputNotes = "${{ inputs.release_notes }}".Trim()
+          $title = ""
+          $notes = ""
+
           if ($inputTitle) {
               $title = $inputTitle
-          } else {
+          } elseif ($tagMsg) {
+              $lines = $tagMsg -split "`r?`n"
+              $firstLine = $lines[0].Trim()
+              # If first line is a formatted title like "v1.9.1: UI Polish..."
+              if ($firstLine -match "^$tag[:\s]" -or $firstLine -match '^v\d+\.\d+') {
+                  $title = $firstLine
+                  if ($lines.Length -gt 1) {
+                      $notes = ($lines[1..($lines.Length - 1)] -join "`n").Trim()
+                  }
+              }
+          }
+
+          if (-not $title) {
               $title = "Release $tag"
           }
 
-          # 3. Determine Notes (Manual input or Git Tag Annotation message)
-          $notes = "${{ inputs.release_notes }}".Trim()
-          if (-not $notes -and $env:GITHUB_REF_TYPE -eq 'tag') {
-              $tagMsg = git tag -l --format='%(contents)' $tag
-              if ($tagMsg -and $tagMsg.Trim()) {
-                  $notes = $tagMsg.Trim()
+          if (-not $notes) {
+              if ($inputNotes) {
+                  $notes = $inputNotes
+              } elseif ($tagMsg -and $tagMsg -ne $title) {
+                  $notes = $tagMsg
               }
           }
 

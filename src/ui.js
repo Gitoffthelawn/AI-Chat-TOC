@@ -1240,7 +1240,7 @@ window.TOC.UI = class UI {
                 } else {
                     // Full repopulate: Chat switched, item count decreased, or answer visibility changed
                     const savedScrollTop = tocList.scrollTop;
-                    tocList.innerHTML = "";
+                    tocList.replaceChildren();
                     this.populateTOCList(tocList, questions);
                     tocList.scrollTop = savedScrollTop;
 
@@ -1601,10 +1601,22 @@ window.TOC.UI = class UI {
             }
         };
 
+        const parser = new DOMParser();
         options.forEach(opt => {
             const btn = document.createElement("button");
             btn.className = "toc-export-option";
-            btn.innerHTML = `${opt.icon}<span>${opt.label}</span>`;
+
+            try {
+                const svgDoc = parser.parseFromString(opt.icon, "image/svg+xml");
+                if (svgDoc.documentElement && svgDoc.documentElement.nodeName === "svg") {
+                    btn.appendChild(document.importNode(svgDoc.documentElement, true));
+                }
+            } catch (err) { /* ignore */ }
+
+            const labelSpan = document.createElement("span");
+            labelSpan.textContent = opt.label;
+            btn.appendChild(labelSpan);
+
             btn.addEventListener("click", () => {
                 opt.action();
                 menu.remove();
@@ -1898,7 +1910,16 @@ window.TOC.UI = class UI {
             this.themeManager.applyTheme(popover, this.config.platformKey);
 
             // Clean content creation
-            popover.innerHTML = "";
+            popover.replaceChildren();
+
+            const parseSvgNode = (svgStr) => {
+                try {
+                    const doc = new DOMParser().parseFromString(svgStr, "image/svg+xml");
+                    return document.importNode(doc.documentElement, true);
+                } catch (e) {
+                    return null;
+                }
+            };
 
             // Header Row: Badge & Copy buttons
             const header = document.createElement("div");
@@ -1916,7 +1937,8 @@ window.TOC.UI = class UI {
             // Copy Query Button
             const copyQBtn = document.createElement("button");
             copyQBtn.title = "Copy query";
-            copyQBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+            const qSvg = parseSvgNode('<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>');
+            if (qSvg) copyQBtn.appendChild(qSvg);
             copyQBtn.addEventListener("click", (e) => {
                 e.stopPropagation();
                 this.copyToClipboard(questionText, "Query copied!");
@@ -1927,7 +1949,8 @@ window.TOC.UI = class UI {
             if (showAnswers && answerText) {
                 const copyABtn = document.createElement("button");
                 copyABtn.title = "Copy answer";
-                copyABtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`;
+                const aSvg = parseSvgNode('<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>');
+                if (aSvg) copyABtn.appendChild(aSvg);
                 copyABtn.addEventListener("click", (e) => {
                     e.stopPropagation();
                     this.copyToClipboard(answerText, "Answer copied!");
