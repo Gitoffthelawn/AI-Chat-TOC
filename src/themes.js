@@ -58,7 +58,12 @@ const DEFAULT_SETTINGS = {
     cacheEnabled: true // v1.9.0: persistent TOC cache (ChatGPT /c/<id> + /share/<id>)
 };
 
+// Only these keys may be treated as user settings. chrome.storage.local is shared
+// with the persistent TOC cache (toc_chat_*, toc_chat_index, ...), so an unfiltered
+// onChanged listener rebuilds the TOC on every cache write.
+const SETTINGS_KEYS = Object.keys(DEFAULT_SETTINGS);
+
 // Make it available to content script and popup
 if (typeof module !== 'undefined') {
-    module.exports = { THEMES, DEFAULT_THEMES, DEFAULT_SETTINGS };
+    module.exports = { THEMES, DEFAULT_THEMES, DEFAULT_SETTINGS, SETTINGS_KEYS };
 }

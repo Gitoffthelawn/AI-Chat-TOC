@@ -10,7 +10,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             ? browser.storage.local
             : null;
 
-    // ── Update version from manifest ────────────────────────────
+    // ── Update version from manifest (Single Source of Truth) ──────
     const versionSpan = document.querySelector('.header-version');
     if (versionSpan) {
         try {
@@ -21,12 +21,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                     : null;
             if (manifest && manifest.version) {
                 versionSpan.textContent = `v${manifest.version}`;
-            } else {
-                versionSpan.textContent = 'v1.9.0';
             }
-        } catch (e) {
-            versionSpan.textContent = 'v1.9.0';
-        }
+        } catch (e) { /* ignore */ }
     }
 
     // ── External links (MV2 / MV3 safe tab opener) ───────────────

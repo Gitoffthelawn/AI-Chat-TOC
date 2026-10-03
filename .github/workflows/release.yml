@@ -1,0 +1,133 @@
+name: Release Extension
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag (e.g. v1.9.1). Leave empty to use version in chrome_manifest.json.'
+        required: false
+        default: ''
+      release_title:
+        description: 'Release Title (e.g. v1.9.1: UI Polish & Export Menu). Leave empty for "Release <tag>".'
+        required: false
+        default: ''
+      release_notes:
+        description: 'Custom Release Notes / Description (Markdown). Leave empty to auto-generate from commits.'
+        required: false
+        default: ''
+      draft:
+        description: 'Create as a draft release (allows you to review before publishing)'
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: 'Mark as a pre-release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Verify JavaScript syntax
+        run: |
+          node --check src/ui.js
+          node --check src/themes.js
+          node --check src/main.js
+          node --check src/virtual.js
+          node --check src/store.js
+          node --check src/storage.js
+          node --check src/popup.js
+
+      - name: Determine Release Details
+        id: release_info
+        shell: pwsh
+        run: |
+          # 1. Determine Tag
+          $inputTag = "${{ inputs.tag_name }}".Trim()
+          if ($inputTag) {
+              $tag = $inputTag
+          } elseif ($env:GITHUB_REF_TYPE -eq 'tag') {
+              $tag = $env:GITHUB_REF_NAME
+          } else {
+              $manifest = Get-Content manifests/chrome_manifest.json -Raw | ConvertFrom-Json
+              $tag = "v$($manifest.version)"
+          }
+
+          # 2. Determine Title
+          $inputTitle = "${{ inputs.release_title }}".Trim()
+          if ($inputTitle) {
+              $title = $inputTitle
+          } else {
+              $title = "Release $tag"
+          }
+
+          # 3. Determine Notes (Manual input or Git Tag Annotation message)
+          $notes = "${{ inputs.release_notes }}".Trim()
+          if (-not $notes -and $env:GITHUB_REF_TYPE -eq 'tag') {
+              $tagMsg = git tag -l --format='%(contents)' $tag
+              if ($tagMsg -and $tagMsg.Trim()) {
+                  $notes = $tagMsg.Trim()
+              }
+          }
+
+          Write-Host "Release Tag: $tag"
+          Write-Host "Release Title: $title"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "title=$title" >> $env:GITHUB_OUTPUT
+
+          if ($notes) {
+              Set-Content -Path "release_notes.md" -Value $notes -Encoding UTF8
+              "has_notes=true" >> $env:GITHUB_OUTPUT
+          } else {
+              "has_notes=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Build Extension Zip Packages
+        shell: pwsh
+        run: |
+          pwsh ./build.ps1
+
+      - name: Verify Generated Archives
+        shell: pwsh
+        run: |
+          if (-not (Test-Path chrome.zip)) { throw "chrome.zip was not created!" }
+          if (-not (Test-Path firefox.zip)) { throw "firefox.zip was not created!" }
+          $chromeSize = (Get-Item chrome.zip).Length
+          $firefoxSize = (Get-Item firefox.zip).Length
+          Write-Host "chrome.zip size: $chromeSize bytes"
+          Write-Host "firefox.zip size: $firefoxSize bytes"
+          if ($chromeSize -lt 1000) { throw "chrome.zip is suspiciously small ($chromeSize bytes)" }
+          if ($firefoxSize -lt 1000) { throw "firefox.zip is suspiciously small ($firefoxSize bytes)" }
+
+      - name: Create GitHub Release & Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_info.outputs.tag }}
+          name: ${{ steps.release_info.outputs.title }}
+          body_path: ${{ steps.release_info.outputs.has_notes == 'true' && 'release_notes.md' || '' }}
+          files: |
+            chrome.zip
+            firefox.zip
+          draft: ${{ inputs.draft || false }}
+          prerelease: ${{ inputs.prerelease || false }}
+          generate_release_notes: true

@@ -90,29 +90,211 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    contain: layout style;
+    isolation: isolate;
     transition: background var(--toc-transition-slow),
         border-color var(--toc-transition-slow),
         box-shadow var(--toc-transition-slow),
         color var(--toc-transition-slow);
 }
 
-/* Settings Update Accent Glow / Feedback Animation */
-@keyframes tocSettingUpdatedGlow {
+/* =================================================================== */
+/* Ambient Update Glow (settings applied / scan finished)              */
+/* =================================================================== */
+
+/* Soft ambient border glow that highlights the card or pill without
+   harsh expanding outline lines or focus ring glitches. */
+@keyframes tocAmbientGlow {
     0% {
-        box-shadow: var(--toc-shadow-xl), 0 0 0 0 var(--toc-accent);
+        border-color: var(--toc-border-primary);
+        box-shadow: var(--toc-shadow-xl);
     }
-
-    35% {
-        box-shadow: var(--toc-shadow-xl), 0 0 0 4px var(--toc-accent-light), 0 0 16px var(--toc-accent);
+    30% {
+        border-color: var(--toc-accent);
+        box-shadow: 0 0 0 1px var(--toc-accent), 0 0 16px var(--toc-accent-light), var(--toc-shadow-xl);
     }
-
     100% {
-        box-shadow: var(--toc-shadow-xl), 0 0 0 0 transparent;
+        border-color: var(--toc-border-primary);
+        box-shadow: var(--toc-shadow-xl);
     }
 }
 
 #toc-extension.toc-setting-updated {
-    animation: tocSettingUpdatedGlow 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+    animation: tocAmbientGlow 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* =================================================================== */
+/* Collapse / Expand GPU Transform Animations (60-120fps, Zero Reflow) */
+/* =================================================================== */
+
+#toc-extension.toc-collapsing {
+    transform-origin: top right;
+    animation: tocPanelCollapse 180ms cubic-bezier(0.32, 0, 0.67, 0) forwards;
+    pointer-events: none;
+}
+
+@keyframes tocPanelCollapse {
+    0% {
+        opacity: 1;
+        transform: scale(1);
+    }
+    100% {
+        opacity: 0;
+        transform: scale(0.25);
+    }
+}
+
+#toc-extension.collapsed.toc-pill-entering {
+    animation: tocPillEnter 160ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes tocPillEnter {
+    0% {
+        transform: scale(0.6);
+        opacity: 0.4;
+    }
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+#toc-extension.toc-expanding {
+    transform-origin: top right;
+    animation: tocPanelExpand 220ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes tocPanelExpand {
+    0% {
+        opacity: 0;
+        transform: scale(0.25);
+    }
+    50% {
+        opacity: 1;
+    }
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+/* Row entrance animation for newly appended queries */
+@keyframes tocRowEnter {
+    from {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+#toc-extension ul > li.toc-row-enter {
+    animation: tocRowEnter 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Reduced motion: hold a static ring instead of an animation */
+@media (prefers-reduced-motion: reduce) {
+    #toc-extension.toc-setting-updated {
+        animation: none !important;
+        border-color: var(--toc-accent);
+    }
+
+    #toc-extension.collapsed.has-unseen .toc-pill-badge,
+    #toc-extension.toc-collapsing,
+    #toc-extension.collapsed.toc-pill-entering,
+    #toc-extension.toc-expanding,
+    #toc-extension ul > li.toc-row-enter {
+        animation: none !important;
+    }
+}
+
+/* =================================================================== */
+/* Update Signals (count delta / unseen badge / screen-reader region)   */
+/* =================================================================== */
+
+/* Transient "+N" chip in the footer. Absolutely positioned (the footer is the
+   positioning context) so the centred query count never shifts when it appears. */
+.toc-count-delta {
+    position: absolute;
+    right: var(--toc-spacing-lg);
+    top: 50%;
+    padding: 1px 7px;
+    border-radius: var(--toc-radius-full);
+    background: var(--toc-accent);
+    color: #fff;
+    font-size: var(--toc-font-size-xs);
+    font-weight: var(--toc-font-weight-semibold);
+    line-height: 1.6;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(-50%) translateY(3px);
+    transition: opacity 200ms ease, visibility 200ms ease,
+        transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.toc-count-delta.show {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(-50%);
+}
+
+/* Unseen-count badge for the collapsed pill. Inset rather than hanging off a
+   corner because #toc-extension clips its children with overflow:hidden.
+   Bottom-right specifically: the hamburger's last stroke is the short one
+   (M4 18h10), so that corner is the only one the glyph does not occupy. */
+.toc-pill-badge {
+    position: absolute;
+    bottom: 3px;
+    right: 3px;
+    min-width: 15px;
+    height: 15px;
+    padding: 0 4px;
+    box-sizing: border-box;
+    border-radius: var(--toc-radius-full);
+    background: var(--toc-accent);
+    color: #fff;
+    font-family: var(--toc-font-family);
+    font-size: 10px;
+    font-weight: var(--toc-font-weight-semibold);
+    line-height: 15px;
+    text-align: center;
+    display: none;
+    z-index: 3;
+    pointer-events: none;
+}
+
+#toc-extension.collapsed.has-unseen .toc-pill-badge {
+    display: block;
+    animation: tocBadgePop 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes tocBadgePop {
+    from {
+        transform: scale(0.6);
+        opacity: 0;
+    }
+
+    to {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+/* Visually hidden but announced. Every visual signal above is aria-hidden, so
+   this is the only channel screen readers get. */
+.toc-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
 }
 
 /* =================================================================== */
@@ -129,7 +311,9 @@
     cursor: move;
     user-select: none;
     flex-shrink: 0;
-    transition: all var(--toc-transition-slow);
+    transition: background var(--toc-transition-fast),
+        color var(--toc-transition-slow),
+        border-color var(--toc-transition-slow);
 }
 
 .toc-header-content {
@@ -306,23 +490,45 @@
     overflow-y: auto;
     max-height: var(--toc-list-max-height);
     flex: 1;
+    scrollbar-width: thin;
+    scrollbar-color: var(--toc-border-secondary) transparent;
 }
 
-#toc-extension ul::-webkit-scrollbar {
+#toc-extension ul::-webkit-scrollbar,
+#toc-compact-popover::-webkit-scrollbar,
+.toc-popover-answer-body::-webkit-scrollbar {
     width: 6px;
 }
 
-#toc-extension ul::-webkit-scrollbar-track {
+#toc-extension ul::-webkit-scrollbar-track,
+#toc-compact-popover::-webkit-scrollbar-track,
+.toc-popover-answer-body::-webkit-scrollbar-track {
     background: transparent;
 }
 
-#toc-extension ul::-webkit-scrollbar-thumb {
+#toc-extension ul::-webkit-scrollbar-thumb,
+#toc-compact-popover::-webkit-scrollbar-thumb,
+.toc-popover-answer-body::-webkit-scrollbar-thumb {
     background: var(--toc-border-secondary);
     border-radius: var(--toc-radius-full);
 }
 
-#toc-extension ul::-webkit-scrollbar-thumb:hover {
+#toc-extension ul::-webkit-scrollbar-thumb:hover,
+#toc-compact-popover::-webkit-scrollbar-thumb:hover,
+.toc-popover-answer-body::-webkit-scrollbar-thumb:hover {
     background: var(--toc-text-muted);
+}
+
+/* Empty search results state */
+.toc-empty-search {
+    padding: var(--toc-spacing-2xl) var(--toc-spacing-lg);
+    text-align: center;
+    color: var(--toc-text-muted);
+    font-size: var(--toc-font-size-sm);
+    font-style: italic;
+    list-style: none;
+    pointer-events: none;
+    border-left: none !important;
 }
 
 /* List Items */
@@ -615,24 +821,27 @@
 }
 
 #toc-extension .toc-header-content,
-#toc-extension h2,
 #toc-extension .toc-search-container,
-#toc-extension ul {
-    transition: opacity 200ms ease-in-out, visibility 200ms ease-in-out;
-    transition-delay: 150ms;
+#toc-extension ul,
+#toc-extension .toc-footer {
+    transition: opacity var(--toc-transition-fast) ease;
     opacity: 1;
-    visibility: visible;
 }
 
 #toc-extension.collapsed .toc-header-content,
-#toc-extension.collapsed h2,
 #toc-extension.collapsed .toc-search-container,
-#toc-extension.collapsed ul {
-    opacity: 0;
-    visibility: hidden;
-    pointer-events: none;
-    transition: opacity 100ms ease-in-out, visibility 100ms ease-in-out;
-    transition-delay: 0ms;
+#toc-extension.collapsed ul,
+#toc-extension.collapsed .toc-footer,
+#toc-extension.collapsed #toc-export-btn,
+#toc-extension.collapsed #toc-scan-btn,
+#toc-extension.collapsed .toc-resize-handle {
+    display: none !important;
+}
+
+#toc-extension #toc-export-btn,
+#toc-extension #toc-scan-btn {
+    transition: background-color var(--toc-transition-fast),
+        border-color var(--toc-transition-fast);
 }
 
 #toc-extension.collapsed #toc-toggle-btn {
@@ -780,10 +989,6 @@
     background-color: var(--toc-accent);
 }
 
-#toc-extension.collapsed #toc-export-btn {
-    display: none;
-}
-
 #toc-scan-btn {
     width: var(--toc-button-size);
     height: var(--toc-button-size);
@@ -835,10 +1040,6 @@
     }
 }
 
-#toc-extension.collapsed #toc-scan-btn {
-    display: none;
-}
-
 /* Legacy alias for backward compat */
 #toc-refresh-btn {
     display: none !important;
@@ -858,17 +1059,34 @@
     top: 56px;
     right: var(--toc-spacing-md);
     background: var(--toc-bg-primary);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
     border: 1px solid var(--toc-border-secondary);
     border-radius: var(--toc-radius-md);
-    box-shadow: var(--toc-shadow-lg);
+    box-shadow: var(--toc-shadow-xl);
     padding: var(--toc-spacing-xs);
     z-index: 10002;
-    min-width: 160px;
+    min-width: 175px;
+    transform-origin: top right;
+    animation: tocMenuEnter 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes tocMenuEnter {
+    from {
+        opacity: 0;
+        transform: scale(0.94) translateY(-4px);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+    }
 }
 
 .toc-export-option {
     position: relative;
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: var(--toc-spacing-sm);
     width: 100%;
     padding: var(--toc-spacing-sm) var(--toc-spacing-md);
     background: transparent;
@@ -879,13 +1097,25 @@
     font-family: inherit;
     text-align: left;
     cursor: pointer;
+    box-sizing: border-box;
     transition: all var(--toc-transition-fast);
+}
+
+.toc-export-option svg {
+    flex-shrink: 0;
+    opacity: 0.7;
+    transition: opacity var(--toc-transition-fast), stroke var(--toc-transition-fast);
 }
 
 .toc-export-option:hover {
     background: var(--toc-accent-light);
     color: var(--toc-accent-hover);
     transform: translateX(2px);
+}
+
+.toc-export-option:hover svg {
+    opacity: 1;
+    stroke: var(--toc-accent);
 }
 
 .toc-export-option:focus-visible {
@@ -903,6 +1133,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    position: relative;
     padding: var(--toc-spacing-sm) var(--toc-spacing-xl);
     border-top: 1px solid var(--toc-border-primary);
     background: var(--toc-bg-secondary);
@@ -913,10 +1144,6 @@
     font-size: var(--toc-font-size-xs);
     color: var(--toc-text-muted);
     font-weight: var(--toc-font-weight-medium);
-}
-
-#toc-extension.collapsed .toc-footer {
-    display: none;
 }
 
 /* =================================================================== */
@@ -962,7 +1189,7 @@
     width: 20px;
     height: 20px;
     z-index: 10001;
-    transition: opacity var(--toc-transition-fast);
+    transition: opacity var(--toc-transition-fast), visibility var(--toc-transition-fast);
     opacity: 0;
     touch-action: none;
 }
@@ -1018,7 +1245,9 @@
 }
 
 #toc-extension.collapsed .toc-resize-handle {
-    display: none;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
 }
 
 /* =================================================================== */
@@ -1126,6 +1355,8 @@
     max-height: 60vh;
     max-width: 380px;
     overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--toc-border-secondary) transparent;
 }
 
 #toc-compact-popover.show {
@@ -1231,4 +1462,6 @@
     white-space: pre-wrap;
     max-height: 200px;
     overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--toc-border-secondary) transparent;
 }

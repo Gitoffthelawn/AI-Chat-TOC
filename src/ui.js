@@ -23,6 +23,13 @@ window.TOC.CONSTANTS = {
         TOC_SEARCH_CONTAINER: "toc-search-container",
         TOC_RESIZE_HANDLE: "toc-resize-handle",
         COLLAPSED: "collapsed",
+        SETTING_UPDATED: "toc-setting-updated",
+        UNSEEN: "has-unseen", // pill badge: additions the user has not looked at yet
+        SHOWN: "show", // delta chip visible
+    },
+    REFRESH: {
+        HOLD_MS: 800, // how long the ambient glow stays on
+        DELTA_HOLD_MS: 2400, // how long the "+N" chip stays visible
     },
     CONSTRAINTS: {
         PADDING: 10,
@@ -208,15 +215,26 @@ window.TOC.ThemeManager = class ThemeManager {
     }
 
     onSettingsChanged(callback) {
+        // chrome.storage.local also holds the persistent TOC cache (toc_chat_*).
+        // Without this filter every debounced cache save fired the callback, which
+        // tore down and rebuilt the TOC ~once per second while scrolling ChatGPT.
+        const settingKeys = (typeof SETTINGS_KEYS !== 'undefined' && SETTINGS_KEYS)
+            ? SETTINGS_KEYS
+            : Object.keys(DEFAULT_SETTINGS);
+
         const handler = (changes, area) => {
-            if (area === "local") {
-                for (let key in changes) {
-                    if (changes[key].newValue !== undefined) {
-                        this.settings[key] = changes[key].newValue;
-                    }
+            if (area !== "local") return;
+
+            let settingsTouched = false;
+            for (let key in changes) {
+                if (settingKeys.indexOf(key) === -1) continue;
+                if (changes[key].newValue !== undefined) {
+                    this.settings[key] = changes[key].newValue;
+                    settingsTouched = true;
                 }
-                if (callback) callback(this.settings);
             }
+
+            if (settingsTouched && callback) callback(this.settings);
         };
 
         const api = (typeof chrome !== 'undefined' && chrome.storage) ? chrome : (typeof browser !== 'undefined' && browser.storage) ? browser : null;
@@ -344,10 +362,15 @@ window.TOC.DragManager = class DragManager {
     }
 
     toggleCollapse(isExpanding) {
+        if (this._isToggling) return;
+
+        const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
         const rect = this.element.getBoundingClientRect();
         const currentX = rect.left;
         const currentY = rect.top;
-        const collapsedSize = 48;
+        const collapsedSize = 44;
+
+        const toggleBtn = this.element.querySelector('#' + window.TOC.CONSTANTS.IDS.TOC_TOGGLE_BTN);
 
         if (!isExpanding) {
             const expandedWidth = rect.width;
@@ -356,14 +379,40 @@ window.TOC.DragManager = class DragManager {
             this.element.dataset.expandedHeight = expandedHeight;
 
             const newX = currentX + expandedWidth - collapsedSize;
+            if (toggleBtn) {
+                toggleBtn.title = "Expand Table of Contents (Alt+T)";
+            }
 
-            this.element.classList.add(window.TOC.CONSTANTS.CLASSES.COLLAPSED);
-            this.element.style.removeProperty("width");
-            this.element.style.removeProperty("height");
-            this.element.style.removeProperty("max-height");
-            this.positionManager.applyPosition(this.element, newX, currentY);
-            this.positionManager.savePosition(newX, currentY);
-            this.positionManager.saveCollapsedState(true);
+            if (reduceMotion) {
+                this.element.classList.add(window.TOC.CONSTANTS.CLASSES.COLLAPSED);
+                this.element.style.removeProperty("width");
+                this.element.style.removeProperty("height");
+                this.element.style.removeProperty("max-height");
+                this.positionManager.applyPosition(this.element, newX, currentY);
+                this.positionManager.savePosition(newX, currentY);
+                this.positionManager.saveCollapsedState(true);
+                return;
+            }
+
+            this._isToggling = true;
+            this.element.classList.add("toc-collapsing");
+
+            setTimeout(() => {
+                this.element.classList.remove("toc-collapsing");
+                this.element.classList.add(window.TOC.CONSTANTS.CLASSES.COLLAPSED);
+                this.element.style.removeProperty("width");
+                this.element.style.removeProperty("height");
+                this.element.style.removeProperty("max-height");
+                this.positionManager.applyPosition(this.element, newX, currentY);
+                this.positionManager.savePosition(newX, currentY);
+                this.positionManager.saveCollapsedState(true);
+
+                this.element.classList.add("toc-pill-entering");
+                setTimeout(() => {
+                    this.element.classList.remove("toc-pill-entering");
+                    this._isToggling = false;
+                }, 160);
+            }, 180);
         } else {
             const savedSize = this.positionManager.getSavedSize();
             const expandedWidth = savedSize
@@ -371,23 +420,42 @@ window.TOC.DragManager = class DragManager {
                 : (parseFloat(this.element.dataset.expandedWidth) || 300);
             const expandedHeight = savedSize
                 ? savedSize.height
-                : parseFloat(this.element.dataset.expandedHeight);
+                : (parseFloat(this.element.dataset.expandedHeight) || 400);
 
             const newX = currentX - (expandedWidth - collapsedSize);
             this.element.classList.remove(window.TOC.CONSTANTS.CLASSES.COLLAPSED);
+            if (toggleBtn) {
+                toggleBtn.title = "Collapse Table of Contents (Alt+T)";
+            }
 
             if (savedSize) {
                 this.positionManager.applySize(this.element, expandedWidth, expandedHeight);
                 const list = this.element.querySelector("ul");
                 if (list) list.style.maxHeight = "none";
+            } else {
+                this.element.style.removeProperty("width");
+                this.element.style.removeProperty("height");
             }
 
             const constrained = this.positionManager.constrainToViewport(
-                newX, currentY, expandedWidth, this.element.offsetHeight
+                newX, currentY, expandedWidth, expandedHeight
             );
             this.positionManager.applyPosition(this.element, constrained.x, constrained.y);
             this.positionManager.savePosition(constrained.x, constrained.y);
             this.positionManager.saveCollapsedState(false);
+
+            if (window.TOC && window.TOC.uiInstance) {
+                window.TOC.uiInstance.clearUnseen();
+            }
+
+            if (reduceMotion) return;
+
+            this._isToggling = true;
+            this.element.classList.add("toc-expanding");
+            setTimeout(() => {
+                this.element.classList.remove("toc-expanding");
+                this._isToggling = false;
+            }, 220);
         }
     }
 
@@ -596,6 +664,19 @@ window.TOC.SearchManager = class SearchManager {
     init() {
         this.searchInput.addEventListener("input", this.handleSearchInput.bind(this));
         this.searchClear.addEventListener("click", this.clearSearch.bind(this));
+        this.searchInput.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") {
+                if (this.searchInput.value) {
+                    this.clearSearch();
+                } else {
+                    this.searchInput.blur();
+                }
+            }
+        });
+    }
+
+    setListItems(items) {
+        this.allListItems = Array.from(items);
     }
 
     addListItems(items) {
@@ -609,13 +690,46 @@ window.TOC.SearchManager = class SearchManager {
 
     updateSearchResults() {
         const searchTerm = this.searchInput.value.toLowerCase().trim();
+        let matchCount = 0;
 
         this.allListItems.forEach((item) => {
             const text = item.querySelector("a").textContent.toLowerCase();
             const answer = (item.getAttribute("data-answer") || "").toLowerCase();
             const shouldShow = searchTerm === "" || text.includes(searchTerm) || answer.includes(searchTerm);
             item.style.display = shouldShow ? "" : "none";
+            if (shouldShow) matchCount++;
         });
+
+        // Dynamic footer count & empty search state
+        const tocContainer = document.getElementById(window.TOC.CONSTANTS.IDS.TOC_CONTAINER);
+        if (tocContainer) {
+            const countEl = tocContainer.querySelector(".toc-count");
+            const tocList = tocContainer.querySelector("ul");
+            let emptyEl = tocList ? tocList.querySelector(".toc-empty-search") : null;
+
+            if (searchTerm !== "") {
+                if (countEl) {
+                    countEl.textContent = `${matchCount} of ${this.allListItems.length} queries`;
+                }
+                if (matchCount === 0) {
+                    if (!emptyEl && tocList) {
+                        emptyEl = document.createElement("li");
+                        emptyEl.className = "toc-empty-search";
+                        emptyEl.textContent = "No matching queries";
+                        tocList.appendChild(emptyEl);
+                    }
+                } else if (emptyEl) {
+                    emptyEl.remove();
+                }
+            } else {
+                if (countEl) {
+                    countEl.textContent = `${this.allListItems.length} queries`;
+                }
+                if (emptyEl) {
+                    emptyEl.remove();
+                }
+            }
+        }
     }
 
     updateClearButtonVisibility() {
@@ -650,6 +764,8 @@ window.TOC.UI = class UI {
         this.isNavigating = false;
         this._navTimer = null;
         this._started = false;
+
+        window.TOC.uiInstance = this;
 
         // Construction registers listeners only — scanners start in start().
         this.init();
@@ -720,16 +836,118 @@ window.TOC.UI = class UI {
             });
         }
 
-        // Listen for theme/settings changes from popup
+        // Listen for theme/settings changes from popup. Provide instant visual feedback via accent pulse.
         this.themeManager.onSettingsChanged(() => {
             this.themeManager.loadSettings().then(() => {
-                try {
-                    const old = document.getElementById(window.TOC.CONSTANTS.IDS.TOC_CONTAINER);
-                    if (old && old.parentNode) old.parentNode.removeChild(old);
-                } catch (e) { /* ignore */ }
                 this.createTOC(true);
+                const existingTOC = document.getElementById(window.TOC.CONSTANTS.IDS.TOC_CONTAINER);
+                if (existingTOC) {
+                    this.pulseContainer(existingTOC);
+                }
             });
         });
+    }
+
+    /**
+     * Signals that `count` items were added to the list. Each part carries
+     * something the others do not:
+     * - row entrance: WHICH rows are new (only those animate)
+     * - delta chip:   HOW MANY were added
+     * - pill badge:   survives being collapsed or not looking at the tab
+     * - live region:  the same facts, for screen readers
+     */
+    signalAddedItems(toc, count) {
+        this.showCountDelta(toc, count);
+        this.addUnseen(toc, count);
+        this.announce(`${count} new item${count === 1 ? "" : "s"} added to the table of contents`);
+        // Collapsed: the badge is the only visible part, so draw the eye to the pill.
+        if (toc.classList.contains(window.TOC.CONSTANTS.CLASSES.COLLAPSED)) {
+            this.pulseContainer(toc);
+        }
+    }
+
+    showCountDelta(toc, count) {
+        const CONSTANTS = window.TOC.CONSTANTS;
+        const chip = toc.querySelector(".toc-count-delta");
+        if (!chip) return;
+
+        chip.textContent = `+${count}`;
+        chip.classList.remove(CONSTANTS.CLASSES.SHOWN);
+        requestAnimationFrame(() => {
+            chip.classList.add(CONSTANTS.CLASSES.SHOWN);
+        });
+
+        if (this._deltaTimer) clearTimeout(this._deltaTimer);
+        this._deltaTimer = setTimeout(() => {
+            try { chip.classList.remove(CONSTANTS.CLASSES.SHOWN); } catch (e) { /* ignore */ }
+        }, CONSTANTS.REFRESH.DELTA_HOLD_MS);
+    }
+
+    /**
+     * Accumulates additions on the collapsed pill. Only meaningful while collapsed:
+     * when expanded the user is looking straight at the list, so nothing is unseen.
+     */
+    addUnseen(toc, count) {
+        const CONSTANTS = window.TOC.CONSTANTS;
+        if (!toc.classList.contains(CONSTANTS.CLASSES.COLLAPSED)) {
+            this.clearUnseen();
+            return;
+        }
+        const badge = toc.querySelector(".toc-pill-badge");
+        if (!badge) return;
+
+        this._unseenCount = (this._unseenCount || 0) + count;
+        badge.textContent = this._unseenCount > 99 ? "99+" : String(this._unseenCount);
+        toc.classList.add(CONSTANTS.CLASSES.UNSEEN);
+    }
+
+    clearUnseen() {
+        const CONSTANTS = window.TOC.CONSTANTS;
+        this._unseenCount = 0;
+        const toc = document.getElementById(CONSTANTS.IDS.TOC_CONTAINER);
+        if (!toc) return;
+        toc.classList.remove(CONSTANTS.CLASSES.UNSEEN);
+        const badge = toc.querySelector(".toc-pill-badge");
+        if (badge) badge.textContent = "";
+    }
+
+    /** Accent ring pulse — "look over here". */
+    pulseContainer(toc) {
+        if (!toc) return;
+        const CONSTANTS = window.TOC.CONSTANTS;
+
+        // Cancel any pending cleanup timer from previous pulses
+        if (this._settingUpdateTimer) {
+            clearTimeout(this._settingUpdateTimer);
+            this._settingUpdateTimer = null;
+        }
+
+        // Reliably restart the CSS keyframe animation on EVERY change (including
+        // rapid successive changes without waiting):
+        // 1. Remove the animation class
+        toc.classList.remove(CONSTANTS.CLASSES.SETTING_UPDATED);
+        // 2. Force reflow so browser engine commits the removal before re-adding
+        void toc.offsetWidth;
+        // 3. Re-add class immediately so keyframe animation plays freshly from 0%
+        toc.classList.add(CONSTANTS.CLASSES.SETTING_UPDATED);
+
+        // Remove class after the 800ms animation finishes
+        this._settingUpdateTimer = setTimeout(() => {
+            try {
+                toc.classList.remove(CONSTANTS.CLASSES.SETTING_UPDATED);
+            } catch (e) { /* ignore */ }
+            this._settingUpdateTimer = null;
+        }, CONSTANTS.REFRESH.HOLD_MS);
+    }
+
+    /** Screen-reader announcement through the aria-live region. */
+    announce(message) {
+        try {
+            const live = document.querySelector(
+                `#${window.TOC.CONSTANTS.IDS.TOC_CONTAINER} .toc-sr-only`
+            );
+            if (live) live.textContent = message;
+        } catch (e) { /* ignore */ }
     }
 
     resetLayout() {
@@ -765,15 +983,11 @@ window.TOC.UI = class UI {
         const list = tocContainer.querySelector("ul");
         if (list) list.style.removeProperty("max-height");
 
-        // Force reflow
-        tocContainer.offsetHeight;
-
         requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                tocContainer.style.removeProperty("transition");
-            });
+            tocContainer.style.removeProperty("transition");
         });
 
+        this.clearUnseen();
         this.showToast("TOC size & position reset to default");
     }
 
@@ -786,13 +1000,20 @@ window.TOC.UI = class UI {
 
         const isCollapsed = tocContainer.classList.contains(window.TOC.CONSTANTS.CLASSES.COLLAPSED);
 
-        if (isCollapsed) {
+        if (this.dragManager && this.dragManager.element === tocContainer) {
+            this.dragManager.toggleCollapse(isCollapsed);
+        } else if (isCollapsed) {
             // Expand
             tocContainer.classList.remove(window.TOC.CONSTANTS.CLASSES.COLLAPSED);
+            const toggleBtn = tocContainer.querySelector('#' + window.TOC.CONSTANTS.IDS.TOC_TOGGLE_BTN);
+            if (toggleBtn) toggleBtn.title = "Collapse Table of Contents (Alt+T)";
             this.positionManager.saveCollapsedState(false);
+            this.clearUnseen();
         } else {
             // Collapse
             tocContainer.classList.add(window.TOC.CONSTANTS.CLASSES.COLLAPSED);
+            const toggleBtn = tocContainer.querySelector('#' + window.TOC.CONSTANTS.IDS.TOC_TOGGLE_BTN);
+            if (toggleBtn) toggleBtn.title = "Expand Table of Contents (Alt+T)";
             this.positionManager.saveCollapsedState(true);
         }
 
@@ -894,15 +1115,21 @@ window.TOC.UI = class UI {
             const tocList = existingTOC.querySelector("ul");
             const countEl = existingTOC.querySelector(".toc-count");
             if (tocList) {
-                const savedScrollTop = tocList.scrollTop;
+                const showAnswers = !!(this.themeManager && this.themeManager.settings && this.themeManager.settings.showAnswers);
+                const showAnswersChanged = this._lastShowAnswers !== undefined && this._lastShowAnswers !== showAnswers;
+                this._lastShowAnswers = showAnswers;
+
+                const currentLis = Array.from(tocList.children);
+                const currentLinks = currentLis.map((li) => li.querySelector(".toc-question-row a"));
 
                 // Check if rendered questions are identical to avoid unnecessary DOM work
-                const currentLinks = Array.from(tocList.querySelectorAll(".toc-question-row a"));
-                const isSame = currentLinks.length === questions.length &&
+                const isSame = !showAnswersChanged &&
+                    currentLinks.length === questions.length &&
                     currentLinks.every((a, i) => {
+                        if (!a) return false;
                         const q = questions[i];
                         const qText = typeof q === "string" ? q : q.text;
-                        const storeId = q._storeId || q.id;
+                        const storeId = q._storeId || q.id || (q.promptBarIndex !== undefined && q.promptBarIndex !== null ? `c1-${q.promptBarIndex}` : `toc-question-${i}`);
                         return a.title === qText && (!storeId || a.getAttribute("data-store-id") === storeId);
                     });
 
@@ -910,17 +1137,129 @@ window.TOC.UI = class UI {
                     return;
                 }
 
-                // In-place update: repopulate list without removing the container
-                tocList.innerHTML = "";
-                this.populateTOCList(tocList, questions);
-                tocList.scrollTop = savedScrollTop;
+                // If identical but force is true (e.g. theme/settings change), just sync styles and return
+                if (isSame && force) {
+                    try {
+                        this.themeManager.applyTheme(existingTOC, this.config.platformKey);
+                        if (this.themeManager.settings.compactMode) {
+                            existingTOC.classList.add("compact-mode");
+                        } else {
+                            existingTOC.classList.remove("compact-mode");
+                        }
+                    } catch (e) { /* ignore */ }
+                    return;
+                }
+
+                // Check if we can patch existing items in-place and append new ones,
+                // or if we must do a full rebuild (chat switch, items deleted, or showAnswers toggled).
+                let canPatchIncrementally = !showAnswersChanged && currentLis.length <= questions.length;
+                if (canPatchIncrementally) {
+                    for (let i = 0; i < currentLis.length; i++) {
+                        const link = currentLinks[i];
+                        if (!link) { canPatchIncrementally = false; break; }
+                        const q = questions[i];
+                        const storeId = q._storeId || q.id || (q.promptBarIndex !== undefined && q.promptBarIndex !== null ? `c1-${q.promptBarIndex}` : `toc-question-${i}`);
+                        const currentStoreId = link.getAttribute("data-store-id");
+                        if (storeId && currentStoreId && storeId !== currentStoreId) {
+                            canPatchIncrementally = false;
+                            break;
+                        }
+                    }
+                }
+
+                let addedCount = 0;
+
+                if (canPatchIncrementally) {
+                    // In-place patch existing items
+                    for (let i = 0; i < currentLis.length; i++) {
+                        const li = currentLis[i];
+                        const link = currentLinks[i];
+                        const q = questions[i];
+                        const qText = typeof q === "string" ? q : q.text;
+                        const storeId = q._storeId || q.id || (q.promptBarIndex !== undefined && q.promptBarIndex !== null ? `c1-${q.promptBarIndex}` : `toc-question-${i}`);
+
+                        if (link.title !== qText) {
+                            link.title = qText;
+                        }
+                        const qSpan = link.querySelector(".toc-question-text");
+                        if (qSpan && qSpan.textContent !== qText) {
+                            qSpan.textContent = qText;
+                        }
+                        const copyBtn = li.querySelector(".toc-copy-btn");
+                        if (copyBtn && copyBtn.getAttribute("data-text") !== qText) {
+                            copyBtn.setAttribute("data-text", qText);
+                        }
+                        if (storeId && link.getAttribute("data-store-id") !== storeId) {
+                            link.setAttribute("data-store-id", storeId);
+                        }
+
+                        const answerText = (typeof q !== "string" && q.answer) ? q.answer : "";
+                        if (answerText) {
+                            li.setAttribute("data-answer", answerText);
+                            if (showAnswers) {
+                                const existingAnswerRow = li.querySelector(".toc-answer-row");
+                                if (existingAnswerRow) {
+                                    const answerSpan = existingAnswerRow.querySelector(".toc-answer-text");
+                                    if (answerSpan && answerSpan.textContent !== answerText) {
+                                        answerSpan.textContent = answerText;
+                                        answerSpan.title = answerText.substring(0, 500);
+                                    }
+                                    const answerCopyBtn = existingAnswerRow.querySelector(".toc-answer-copy");
+                                    if (answerCopyBtn && answerCopyBtn.getAttribute("data-text") !== answerText) {
+                                        answerCopyBtn.setAttribute("data-text", answerText);
+                                    }
+                                } else {
+                                    const answerRow = this.createAnswerRow(q, i);
+                                    if (answerRow) li.appendChild(answerRow);
+                                }
+                            }
+                        }
+                    }
+
+                    // Append newly added items
+                    addedCount = questions.length - currentLis.length;
+                    if (addedCount > 0) {
+                        const fragment = document.createDocumentFragment();
+                        const newItems = [];
+                        for (let i = currentLis.length; i < questions.length; i++) {
+                            const li = this.createTOCListItem(questions[i], i, showAnswers);
+                            li.classList.add("toc-row-enter");
+                            fragment.appendChild(li);
+                            newItems.push(li);
+                        }
+                        tocList.appendChild(fragment);
+
+                        if (this.searchManager) {
+                            this.searchManager.addListItems(newItems);
+                            this.searchManager.updateSearchResults();
+                            this.searchManager.updateClearButtonVisibility();
+                        }
+                    } else if (this.searchManager && this.searchManager.searchInput.value) {
+                        this.searchManager.updateSearchResults();
+                    }
+                } else {
+                    // Full repopulate: Chat switched, item count decreased, or answer visibility changed
+                    const savedScrollTop = tocList.scrollTop;
+                    tocList.innerHTML = "";
+                    this.populateTOCList(tocList, questions);
+                    tocList.scrollTop = savedScrollTop;
+
+                    if (this.searchManager) {
+                        this.searchManager.setListItems(Array.from(tocList.children));
+                        this.searchManager.updateSearchResults();
+                        this.searchManager.updateClearButtonVisibility();
+                    }
+                }
 
                 if (countEl) {
                     countEl.textContent = `${questions.length} queries`;
                 }
 
-                // Appearance sync: the container is reused, so re-apply theme
-                // colors/mode and compact class for instant settings updates.
+                if (addedCount > 0) {
+                    this.signalAddedItems(existingTOC, addedCount);
+                }
+
+                // Appearance sync: re-apply theme colors/mode and compact class
                 try {
                     this.themeManager.applyTheme(existingTOC, this.config.platformKey);
                     if (this.themeManager.settings.compactMode) {
@@ -929,13 +1268,6 @@ window.TOC.UI = class UI {
                         existingTOC.classList.remove("compact-mode");
                     }
                 } catch (e) { /* never break list update */ }
-
-                if (this.searchManager) {
-                    const listItems = Array.from(tocList.querySelectorAll("li"));
-                    this.searchManager.addListItems(listItems);
-                    this.searchManager.updateSearchResults();
-                    this.searchManager.updateClearButtonVisibility();
-                }
 
                 console.log(`[TOC] Updated in-place with ${questions.length} items`);
                 return;
@@ -952,6 +1284,7 @@ window.TOC.UI = class UI {
                     if (window.TOC.ConversationIdentity.getCurrentId() !== renderConv) return;
                 }
             } catch (e) { /* ignore */ }
+            this._lastShowAnswers = !!(this.themeManager && this.themeManager.settings && this.themeManager.settings.showAnswers);
             const tocContainer = this.buildTOCStructure(questions);
             this.themeManager.applyTheme(tocContainer, this.config.platformKey);
 
@@ -965,13 +1298,6 @@ window.TOC.UI = class UI {
             } else {
                 document.body.appendChild(tocContainer);
             }
-
-            // Pulse glow feedback animation so user visually sees the update
-            tocContainer.classList.add("toc-setting-updated");
-            if (this._settingUpdateTimer) clearTimeout(this._settingUpdateTimer);
-            this._settingUpdateTimer = setTimeout(() => {
-                try { tocContainer.classList.remove("toc-setting-updated"); } catch (e) { }
-            }, 650);
 
             console.log(`[TOC] Created with ${questions.length} items`);
         });
@@ -1026,7 +1352,7 @@ window.TOC.UI = class UI {
 
         const toggleBtn = document.createElement("button");
         toggleBtn.id = CONSTANTS.IDS.TOC_TOGGLE_BTN;
-        toggleBtn.title = "Toggle Table of Contents";
+        toggleBtn.title = "Collapse Table of Contents (Alt+T)";
 
         headerButtons.appendChild(exportBtn);
         headerButtons.appendChild(scanBtn);
@@ -1183,12 +1509,34 @@ window.TOC.UI = class UI {
         const tocCount = document.createElement("span");
         tocCount.className = "toc-count";
         tocCount.textContent = `${questions.length} queries`;
+        // Transient "+N" chip. Positioned absolutely so the centred count never
+        // shifts sideways when it appears.
+        const tocDelta = document.createElement("span");
+        tocDelta.className = "toc-count-delta";
+        tocDelta.setAttribute("aria-hidden", "true");
         tocFooter.appendChild(tocCount);
+        tocFooter.appendChild(tocDelta);
 
         tocContainer.appendChild(tocHeader);
         tocContainer.appendChild(searchContainer);
         tocContainer.appendChild(tocList);
         tocContainer.appendChild(tocFooter);
+
+        // Unseen-count badge for the collapsed pill. A direct child (not inside the
+        // header, which fades out when collapsed) and inset rather than hanging off
+        // a corner, because #toc-extension clips with overflow:hidden.
+        const pillBadge = document.createElement("span");
+        pillBadge.className = "toc-pill-badge";
+        pillBadge.setAttribute("aria-hidden", "true");
+        tocContainer.appendChild(pillBadge);
+
+        // Every visual signal above is aria-hidden, so this is the only channel
+        // screen readers get. Must exist in the DOM before it is written to.
+        const liveRegion = document.createElement("div");
+        liveRegion.className = "toc-sr-only";
+        liveRegion.setAttribute("role", "status");
+        liveRegion.setAttribute("aria-live", "polite");
+        tocContainer.appendChild(liveRegion);
 
         // Bottom Right Resize Handle
         const resizeRight = document.createElement("div");
@@ -1219,33 +1567,59 @@ window.TOC.UI = class UI {
         menu.className = "toc-export-menu";
 
         const options = [
-            { label: "Copy as Text", action: () => this.exportAsText(questions) },
-            { label: "Copy as Markdown", action: () => this.exportAsMarkdown(questions) },
-            { label: "Download as .txt", action: () => this.downloadAsFile(questions, "txt") },
-            { label: "Download as .md", action: () => this.downloadAsFile(questions, "md") },
+            {
+                label: "Copy as Text",
+                icon: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
+                action: () => this.exportAsText(questions)
+            },
+            {
+                label: "Copy as Markdown",
+                icon: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg>`,
+                action: () => this.exportAsMarkdown(questions)
+            },
+            {
+                label: "Download as .txt",
+                icon: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
+                action: () => this.downloadAsFile(questions, "txt")
+            },
+            {
+                label: "Download as .md",
+                icon: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="12" x2="12" y2="18"/><polyline points="9 15 12 18 15 15"/></svg>`,
+                action: () => this.downloadAsFile(questions, "md")
+            },
         ];
+
+        const closeMenu = (e) => {
+            if (e.type === "keydown" && e.key === "Escape") {
+                menu.remove();
+                document.removeEventListener("click", closeMenu);
+                document.removeEventListener("keydown", closeMenu);
+            } else if (e.type === "click" && !menu.contains(e.target)) {
+                menu.remove();
+                document.removeEventListener("click", closeMenu);
+                document.removeEventListener("keydown", closeMenu);
+            }
+        };
 
         options.forEach(opt => {
             const btn = document.createElement("button");
             btn.className = "toc-export-option";
-            btn.textContent = opt.label;
+            btn.innerHTML = `${opt.icon}<span>${opt.label}</span>`;
             btn.addEventListener("click", () => {
                 opt.action();
                 menu.remove();
+                document.removeEventListener("click", closeMenu);
+                document.removeEventListener("keydown", closeMenu);
             });
             menu.appendChild(btn);
         });
 
         container.appendChild(menu);
 
-        // Close menu when clicking outside
+        // Close menu when clicking outside or pressing Escape
         setTimeout(() => {
-            document.addEventListener("click", function closeMenu(e) {
-                if (!menu.contains(e.target)) {
-                    menu.remove();
-                    document.removeEventListener("click", closeMenu);
-                }
-            });
+            document.addEventListener("click", closeMenu);
+            document.addEventListener("keydown", closeMenu);
         }, 10);
     }
 
@@ -1344,6 +1718,10 @@ window.TOC.UI = class UI {
 
         const toast = document.createElement("div");
         toast.className = "toc-toast";
+        const tocContainer = document.getElementById(window.TOC.CONSTANTS.IDS.TOC_CONTAINER);
+        if (tocContainer && (tocContainer.classList.contains("toc-dark") || document.documentElement.classList.contains("dark"))) {
+            toast.classList.add("toc-dark");
+        }
         toast.textContent = message;
         document.body.appendChild(toast);
 
@@ -1354,105 +1732,126 @@ window.TOC.UI = class UI {
         }, 2000);
     }
 
+    /**
+     * Creates an answer row for a question item if an answer exists.
+     */
+    createAnswerRow(item, index) {
+        const questionId = `toc-question-${index}`;
+        const answerId = `toc-answer-${index}`;
+        const answerText = (typeof item !== "string" && item.answer) ? item.answer : "";
+        const answerElement = (typeof item !== "string" && item.answerElement) ? item.answerElement : null;
+        if (!answerText) return null;
+
+        const answerRow = document.createElement("div");
+        answerRow.className = "toc-answer-row";
+
+        const answerContent = document.createElement("div");
+        answerContent.className = "toc-answer-content";
+
+        const badge = document.createElement("div");
+        badge.className = "toc-answer-badge";
+
+        const answerSpan = document.createElement("span");
+        answerSpan.className = "toc-answer-text";
+        answerSpan.textContent = answerText;
+        answerSpan.title = answerText.substring(0, 500);
+
+        answerContent.appendChild(badge);
+        answerContent.appendChild(answerSpan);
+        answerContent.setAttribute("data-nav-id", answerElement ? answerId : questionId);
+        // v1.9.0: storeId for virtual navigation
+        const answerStoreId = item._answerId || answerId;
+        if (answerStoreId) answerContent.setAttribute("data-store-id", answerStoreId);
+
+        // Answer copy button (stores text in data attribute for delegation)
+        const answerCopyBtn = document.createElement("button");
+        answerCopyBtn.className = "toc-answer-copy";
+        answerCopyBtn.title = "Copy answer";
+        answerCopyBtn.setAttribute("data-text", answerText);
+
+        answerRow.appendChild(answerContent);
+        answerRow.appendChild(answerCopyBtn);
+        return answerRow;
+    }
+
+    /**
+     * Creates a single <li> item for the table of contents.
+     */
+    createTOCListItem(item, index, showAnswers) {
+        const questionText = typeof item === "string" ? item : item.text;
+        const element = typeof item === "string" ? null : item.element;
+        const answerText = (typeof item !== "string" && item.answer) ? item.answer : "";
+        const answerElement = (typeof item !== "string" && item.answerElement) ? item.answerElement : null;
+
+        const questionId = `toc-question-${index}`;
+        const answerId = `toc-answer-${index}`;
+        // v1.9.0: storeId for virtual navigation (Trap 15 — never store element)
+        const storeId = item._storeId || item.id || (item.promptBarIndex !== undefined && item.promptBarIndex !== null ? `c1-${item.promptBarIndex}` : questionId);
+
+        if (element) {
+            element.id = questionId;
+        }
+
+        if (answerElement) {
+            answerElement.id = answerId;
+        }
+
+        const listItem = document.createElement("li");
+        listItem.setAttribute("data-toc-num", index + 1);
+        if (questionText.startsWith("[Attachment")) {
+            listItem.classList.add("toc-attachment-item");
+        }
+        if (answerText) {
+            listItem.setAttribute("data-answer", answerText);
+        }
+
+        const link = document.createElement("a");
+        link.href = `#${questionId}`;
+        link.setAttribute("data-num", index + 1);
+        link.title = questionText;
+        link.setAttribute("data-store-id", storeId);
+        // Also store promptBarIndex for fallback navigation
+        if (item.promptBarIndex !== undefined && item.promptBarIndex !== null) {
+            link.setAttribute("data-prompt-idx", item.promptBarIndex);
+        }
+
+        const qSpan = document.createElement("span");
+        qSpan.className = "toc-question-text";
+        qSpan.textContent = questionText;
+        link.appendChild(qSpan);
+
+        const questionRow = document.createElement("div");
+        questionRow.className = "toc-question-row";
+        questionRow.appendChild(link);
+
+        // Copy button (stores text in data attribute for delegation)
+        const copyBtn = document.createElement("button");
+        copyBtn.className = "toc-copy-btn";
+        copyBtn.title = "Copy query";
+        copyBtn.setAttribute("data-text", questionText);
+
+        questionRow.appendChild(copyBtn);
+        listItem.appendChild(questionRow);
+
+        if (showAnswers && answerText) {
+            const answerRow = this.createAnswerRow(item, index);
+            if (answerRow) listItem.appendChild(answerRow);
+        }
+
+        return listItem;
+    }
+
+    /**
+     * Renders the questions into tocList using a DocumentFragment for maximum performance.
+     */
     populateTOCList(tocList, questions) {
-        const CONSTANTS = window.TOC.CONSTANTS;
         const showAnswers = this.themeManager.settings.showAnswers;
-        const listItems = [];
-
+        const fragment = document.createDocumentFragment();
         questions.forEach((item, index) => {
-            const questionText = typeof item === "string" ? item : item.text;
-            const element = typeof item === "string" ? null : item.element;
-            const answerText = (typeof item !== "string" && item.answer) ? item.answer : "";
-            const answerElement = (typeof item !== "string" && item.answerElement) ? item.answerElement : null;
-
-            const questionId = `toc-question-${index}`;
-            const answerId = `toc-answer-${index}`;
-
-            if (element) {
-                element.id = questionId;
-            }
-
-            if (answerElement) {
-                answerElement.id = answerId;
-            }
-
-            const listItem = document.createElement("li");
-            listItem.setAttribute("data-toc-num", index + 1);
-            if (questionText.startsWith("[Attachment")) {
-                listItem.classList.add("toc-attachment-item");
-            }
-            if (answerText) {
-                listItem.setAttribute("data-answer", answerText);
-            }
-
-            const link = document.createElement("a");
-            link.href = `#${questionId}`;
-            link.setAttribute("data-num", index + 1);
-            link.title = questionText;
-            // v1.9.0: storeId for virtual navigation (Trap 15 — never store element)
-            // Fix: Use real store id, fallback to questionId only if no store
-            const storeId = item._storeId || item.id || (item.promptBarIndex !== undefined && item.promptBarIndex !== null ? `c1-${item.promptBarIndex}` : questionId);
-            link.setAttribute("data-store-id", storeId);
-            // Also store promptBarIndex for fallback navigation
-            if (item.promptBarIndex !== undefined && item.promptBarIndex !== null) {
-                link.setAttribute("data-prompt-idx", item.promptBarIndex);
-            }
-
-            const qSpan = document.createElement("span");
-            qSpan.className = "toc-question-text";
-            qSpan.textContent = questionText;
-            link.appendChild(qSpan);
-
-            const questionRow = document.createElement("div");
-            questionRow.className = "toc-question-row";
-            questionRow.appendChild(link);
-
-            // Copy button (stores text in data attribute for delegation)
-            const copyBtn = document.createElement("button");
-            copyBtn.className = "toc-copy-btn";
-            copyBtn.title = "Copy query";
-            copyBtn.setAttribute("data-text", questionText);
-
-            questionRow.appendChild(copyBtn);
-            listItem.appendChild(questionRow);
-
-            if (showAnswers && answerText) {
-                const answerRow = document.createElement("div");
-                answerRow.className = "toc-answer-row";
-
-                const answerContent = document.createElement("div");
-                answerContent.className = "toc-answer-content";
-
-                const badge = document.createElement("div");
-                badge.className = "toc-answer-badge";
-
-                const answerSpan = document.createElement("span");
-                answerSpan.className = "toc-answer-text";
-                answerSpan.textContent = answerText;
-                answerSpan.title = answerText.substring(0, 500);
-
-                answerContent.appendChild(badge);
-                answerContent.appendChild(answerSpan);
-                answerContent.setAttribute("data-nav-id", answerElement ? answerId : questionId);
-                // v1.9.0: storeId for virtual navigation
-                const answerStoreId = item._answerId || answerId;
-                if (answerStoreId) answerContent.setAttribute("data-store-id", answerStoreId);
-
-                // Answer copy button (stores text in data attribute for delegation)
-                const answerCopyBtn = document.createElement("button");
-                answerCopyBtn.className = "toc-answer-copy";
-                answerCopyBtn.title = "Copy answer";
-                answerCopyBtn.setAttribute("data-text", answerText);
-
-                answerRow.appendChild(answerContent);
-                answerRow.appendChild(answerCopyBtn);
-                listItem.appendChild(answerRow);
-            }
-            tocList.appendChild(listItem);
-            listItems.push(listItem);
+            const li = this.createTOCListItem(item, index, showAnswers);
+            fragment.appendChild(li);
         });
-
-        return listItems;
+        tocList.appendChild(fragment);
     }
 
     setupTOCFunctionality(tocContainer) {
@@ -1648,6 +2047,10 @@ window.TOC.UI = class UI {
         const isCollapsed = this.positionManager.getCollapsedState();
         if (isCollapsed) {
             tocContainer.classList.add(window.TOC.CONSTANTS.CLASSES.COLLAPSED);
+            const toggleBtn = tocContainer.querySelector('#' + window.TOC.CONSTANTS.IDS.TOC_TOGGLE_BTN);
+            if (toggleBtn) {
+                toggleBtn.title = "Expand Table of Contents (Alt+T)";
+            }
         }
     }
 
@@ -1658,7 +2061,7 @@ window.TOC.UI = class UI {
         const listItems = Array.from(tocContainer.querySelectorAll("li"));
 
         this.searchManager = new window.TOC.SearchManager(searchInput, searchClear);
-        this.searchManager.addListItems(listItems);
+        this.searchManager.setListItems(listItems);
     }
 
     setupDragFunctionality(tocContainer) {
@@ -1796,6 +2199,7 @@ window.TOC.UI = class UI {
                 btn.title = originalTitle;
                 if (countEl) countEl.textContent = originalCount;
                 this.createTOC(true);
+                if (tocContainer) this.pulseContainer(tocContainer);
                 // Fix: Toast counts user only, not total
                 let userNew = found;
                 try {

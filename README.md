@@ -5,7 +5,7 @@
 A browser extension that adds a **Table of Contents** sidebar to AI chat interfaces. Never lose track of your conversation again!
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.9.1-blue" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   <img src="https://img.shields.io/badge/platforms-5-orange" alt="Platforms">
   <a href="https://github.com/sponsors/harshmann10"><img src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=githubsponsors" alt="Sponsor"></a>
@@ -95,28 +95,26 @@ Click the **↓** button in the header:
 
 ---
 
-## ⚡ What's New in v1.9.0: Virtualization Engine & Persistent Cache
+## ⚡ What's New in v1.9 (Virtualization & Modern Polish)
 
-Long AI conversations (especially on ChatGPT) use **DOM virtualization**, where messages scrolled out of view are dynamically unmounted from the DOM. In older versions, this meant the TOC could miss questions until you manually scrolled top to bottom.
+Long AI conversations (especially on ChatGPT) use **DOM virtualization**, where messages scrolled out of view are dynamically unmounted from the DOM. Version 1.9 introduces a multi-strategy virtualization and outline caching architecture, accompanied by UI/UX refinements.
 
-**Version 1.9.0 introduces a multi-strategy virtualization and outline caching architecture:**
+### 🚀 Core Architecture (v1.9.0)
 
-- 🔄 **Dual-Source Hybrid Scanning:**
-  - **C3 Backend API Source:** For ChatGPT conversations (`/c/<id>` and `/share/<id>`), securely retrieves the conversation tree in the background to build a complete outline immediately without requiring manual scrolling.
-  - **C1 Prompt Bars & C6 DOM Scanner:** Continuously observes live prompt navigation bars and DOM messages as new responses stream in.
-  - **Intelligent Merge:** Combines both sources, preserving conversation chronological order and exact scroll geometry.
-- 🚀 **Instant Outline Cache (`store.js`, `storage.js`):**
-  - Visited chat outlines are securely saved in extension local storage.
-  - Re-opening a long chat renders your full TOC outline **instantly with zero lag**, while background sync updates any new responses.
-  - Built-in **LRU eviction** ensures storage stays compact and efficient.
-- 🧹 **Cache Management & Settings UX:**
-  - View your stored outline count and estimated cache size directly in the extension popup.
-  - One-click **Clear TOC Cache** button with animated status feedback (`Clearing...` → `Cleared!`).
-  - Real-time **Saved** toast for instant confirmation when changing themes or settings.
-- 🎯 **Precision Scroll Navigation:**
-  - Fixed navigation jumping issues on virtualized chats — clicking any query reliably mounts the target message and smoothly scrolls directly to it.
-- 💖 **Integrated GitHub Sponsorship:**
-  - Direct access to support project development from the popup header.
+- 🔄 **Dual-Source Hybrid Scanning:** Combines ChatGPT's background API tree (`/c/<id>`, `/share/<id>`) with live DOM prompt bars and mutation observers to build a complete outline immediately with zero manual scrolling required.
+- ⚡ **Instant Outline Cache (`store.js`, `storage.js`):** Visited outlines are stored locally with LRU eviction, rendering instantly on revisit with background live sync.
+- 🧹 **TOC Cache Manager:** Storage inspector in the popup displays saved chat count and KB size with a one-click **Clear Cache** action.
+- 🎯 **Precision Scroll Navigation:** Virtualized message mounting ensures clicking any TOC query smoothly scrolls directly to the target response without jumping.
+
+### ✨ Refinements & Polish (v1.9.1)
+
+- 🎨 **Modern Glassmorphic Export Menu:** Redesigned with frosted glass backdrop blur, clean SVG icons (Text, Markdown, File downloads), and instant <kbd>Escape</kbd> dismissal.
+- 💫 **Reactive Ambient Glow:** Soft radial feedback on settings changes and chat scans that reliably re-triggers even on rapid successive clicks without visual stutter.
+- 🔍 **Live Search Count & Empty States:** Real-time `X of Y queries` counter, centered *"No matching queries"* placeholder, and instant <kbd>Escape</kbd> search clearing.
+- 🔄 **GPU-Accelerated Morphing:** Smooth panel collapse/expand powered by GPU `transform` and `opacity` with zero layout thrashing or scroll stutter.
+- 🪟 **Cross-Browser Scrollbars:** Standardized thin custom scrollbars (`scrollbar-width: thin`) across sidebar lists, compact popovers, and answer previews on Firefox and Chromium.
+- 🏷️ **Dynamic Shortcut Tooltips:** Context-aware toggle titles update dynamically between *"Collapse Table of Contents"* and *"Expand Table of Contents"*.
+- 🚀 **Automated GitHub Release Pipeline:** Integrated GitHub Actions workflow to build, verify, and publish releases with production-ready `chrome.zip` and `firefox.zip` bundles.
 
 ---
 
@@ -124,6 +122,9 @@ Long AI conversations (especially on ChatGPT) use **DOM virtualization**, where 
 
 ```
 AI Chat TOC/
+├── .github/                       # GitHub workflows & configuration
+│   └── workflows/
+│       └── release.yml            # Automated build & release pipeline
 ├── src/                           # Shared source code
 │   ├── main.js                    # Router & lifecycle orchestration
 │   ├── popup.html                 # Settings popup UI
@@ -143,6 +144,7 @@ AI Chat TOC/
 ├── dev.ps1                        # Development script (generates dist/)
 ├── build.ps1                      # Production build script (strips tests & console logs)
 ├── LICENSE
+├── AGENTS.md                  # AI agent guidelines, invariants & release procedures
 └── README.md
 ```
 
@@ -180,6 +182,8 @@ You can change the `Ctrl+Shift+F` or `Alt+Shift+C` shortcuts natively in your br
 - [x] ~~Instant outline persistent caching & LRU eviction (v1.9.0)~~
 - [x] ~~TOC Cache management & storage inspector in Settings (v1.9.0)~~
 - [x] ~~Precision virtualized message scroll navigation (v1.9.0)~~
+- [x] ~~UI polish, soft ambient glow & modern export dropdown (v1.9.1)~~
+- [x] ~~Automated GitHub Actions release workflow (v1.9.1)~~
 - [ ] Additional AI platforms (DeepSeek, etc.)
 
 ---
