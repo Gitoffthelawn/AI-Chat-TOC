@@ -33,7 +33,7 @@ const TOC_PERF = {
             const allUser = Array.isArray(userElements) ? userElements : Array.from(document.querySelectorAll(userElements));
 
             // Helper to find the main chat bubble/wrapper for an element
-            const getWrapper = (el) => el.closest('.conversation-turn, [class*="turn"], [class*="message-wrapper"], article, [class*="group"]') || el.parentElement;
+            const getWrapper = (el) => el.closest('[data-turn-key], .conversation-turn, [class*="turn"], [class*="message-wrapper"], article, [class*="group"]') || el.parentElement;
             const currentWrapper = getWrapper(userElement);
 
             let nextUser = null;
@@ -217,13 +217,14 @@ const SITES = {
         platformKey: "chatgpt",
         storageKey: "chatgpt-toc-position",
         selectors: {
-            userMessage: 'div[data-message-author-role="user"]',
+            // NEW UI (2026-10) + legacy combined — counts must be non-zero in both
+            // layouts or the TOC never gets created.
+            userMessage: 'div[data-message-author-role="user"], [data-user-message-bubble]',
             sendButton: '[data-testid="send-button"]',
             promptInput: "#prompt-textarea",
-            chatContainer: 'div[class*="scrollbar-gutter"]',
+            chatContainer: '.thread-scroll-container',
+            chatContainerLegacy: 'div[class*="scrollbar-gutter"]',
             chatContainerFallback: "main",
-            promptBar: '[data-toc-item-index]',
-            promptBarFallback: 'button[aria-label^="Prompt"]',
         },
         delays: {
             pageLoad: 2000,
@@ -246,6 +247,31 @@ const SITES = {
                     }
                 }
             } catch (e) { /* fallback to DOM */ }
+
+            // NEW UI (2026-10): turns are [data-turn-key] wrappers and the user
+            // bubble is [data-user-message-bubble]; data-testid conversation-turn
+            // and data-message-author-role no longer exist.
+            // Scoped to the active conversation — see window.TOC.dom.activeTurns
+            const newTurns = (window.TOC.dom && window.TOC.dom.activeTurns)
+                ? window.TOC.dom.activeTurns()
+                : document.querySelectorAll('[data-turn-key]');
+            if (newTurns.length > 0) {
+                const newQueries = [];
+                newTurns.forEach((turn) => {
+                    const userBubble = turn.querySelector('[data-user-message-bubble]');
+                    if (!userBubble) return;
+                    const text = userBubble.textContent.trim() || "[Attachment]";
+                    const answerElement = turn.querySelector('[data-markdown-text-style="assistant-message"]');
+                    newQueries.push({
+                        text,
+                        element: userBubble,
+                        answer: answerElement ? answerElement.textContent.trim() : "",
+                        answerElement,
+                    });
+                });
+                if (newQueries.length > 0) return newQueries;
+            }
+
             const queryElements = document.querySelectorAll(this.selectors.userMessage);
             const queries = [];
             queryElements.forEach((el) => {
@@ -774,18 +800,12 @@ const SITES = {
                     return;
                 }
                 const store = window.TOC.StoreManager.getStore();
-                // If store empty but bars exist, C1 missed — retry
+                // Store empty → C6 (synchronous DOM source) fills what is rendered.
+                // The prompt-bar scanner (C1) was removed in v1.9.2: ChatGPT deleted
+                // its prompt-navigation UI, so there is nothing to index.
                 if (store.size() === 0) {
-                    const bars = document.querySelectorAll('[data-toc-item-index]');
-                    if (bars.length > 0) {
-                        console.log('[TOC Router] Store empty but bars exist, retrying C1');
-                        window.TOC.Virtual.C1.scan(getSession());
-                        ui.createTOC(true);
-                    } else {
-                        // Small chat or bars not yet rendered — try C6
-                        const added = window.TOC.Virtual.C6.scanCurrent(activeAdapter.platformKey, getSession());
-                        if (added > 0) ui.createTOC(true);
-                    }
+                    const added = window.TOC.Virtual.C6.scanCurrent(activeAdapter.platformKey, getSession());
+                    if (added > 0) ui.createTOC(true);
                 }
             };
             // Retry after 800ms if store still empty (SPA mount delay)
@@ -796,7 +816,6 @@ const SITES = {
             setInterval(() => {
                 if (!document.hidden) {
                     const store = window.TOC.StoreManager.getStore();
-                    const bars = document.querySelectorAll('[data-toc-item-index]').length;
                     const domCount = document.querySelectorAll(activeAdapter.selectors.userMessage).length;
                     // If TOC missing but should exist, or store empty but DOM has messages
                     const tocExists = !!document.getElementById('toc-extension');
@@ -813,6 +832,20 @@ const SITES = {
             if (window.TOC.ConversationIdentity) {
                 window.TOC.ConversationIdentity.onUrlChange((newId, newUrl) => {
                     console.log(`[TOC Router] URL changed to ${newUrl}, re-initializing`);
+                    // Drop the previous chat's rows IMMEDIATELY. Re-init below
+                    // repopulates from cache/DOM (usually within a frame), but
+                    // without this the panel keeps showing chat A's items while
+                    // chat B mounts — and keeps them forever if chat B is empty.
+                    try {
+                        const tocEl = document.getElementById(window.TOC.CONSTANTS.IDS.TOC_CONTAINER);
+                        const list = tocEl && tocEl.querySelector("ul");
+                        if (list) list.replaceChildren();
+                        if (ui && ui.searchManager && typeof ui.searchManager.setListItems === "function") {
+                            ui.searchManager.setListItems([]);
+                        }
+                        const countEl = tocEl && tocEl.querySelector(".toc-count");
+                        if (countEl) countEl.textContent = "";
+                    } catch (e) { /* never block re-init */ }
                     // Reset store already done by StoreManager, now re-init Virtual
                     setTimeout(() => {
                         window.TOC.Virtual.destroy();
@@ -823,8 +856,9 @@ const SITES = {
                         } else {
                             reinitDone = true;
                         }
-                        // Also ensure C1 runs for new chat (slow SPA mount fallback,
-                        // gated on re-init so cached titles render first)
+                        // Also ensure the store fills for the new chat (slow SPA mount
+                        // fallback, gated on re-init so cached titles render first).
+                        // C6 is the synchronous source; C3 arrives in the background.
                         setTimeout(() => {
                             if (!reinitDone) return;
                             const store = window.TOC.StoreManager.getStore();
@@ -833,7 +867,7 @@ const SITES = {
                                 try {
                                     if (window.TOC.Virtual._captureSession) s = window.TOC.Virtual._captureSession();
                                 } catch (e) { /* ignore */ }
-                                window.TOC.Virtual.C1.scan(s);
+                                window.TOC.Virtual.C6.scanCurrent(activeAdapter.platformKey, s);
                                 ui.createTOC(true);
                             }
                         }, 500);

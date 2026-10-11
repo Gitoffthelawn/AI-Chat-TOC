@@ -12,19 +12,33 @@ window.TOC = window.TOC || {};
 // =============================================================================
 window.TOC.SELECTORS = {
     chatgpt: {
-        // C1: Prompt bars — LIVE: [data-toc-item-index] is stable (18/18 in 0.1ms)
-        // button[aria-label^="Prompt"] is STALE (0 results) — aria-label now holds truncated text
-        promptBar: '[data-toc-item-index]',
-        promptBarFallback: 'button[aria-label^="Prompt"]',
-        promptBarTextAttr: 'aria-label', // truncated text without hover (287ms hover unnecessary)
+        // ---------------------------------------------------------------------
+        // NEW UI (LIVE-VERIFIED 2026-10-10) — the thread is a column-reverse
+        // scroller and turns are keyed by a stable UUID instead of data-testid.
+        // ---------------------------------------------------------------------
+        turnContainerNew: '[data-turn-key]',
+        turnKeyAttr: 'data-turn-key',
+        userMessageNew: '[data-user-message-bubble]',
+        assistantMessageNew: '[data-markdown-text-style="assistant-message"]',
+        unitKeyAttr: 'data-chatgpt-search-unit-key',      // e.g. "fallback-turn-2:0:user"
+        unitMsgIdsAttr: 'data-chatgpt-search-message-ids', // space-separated UUIDs
+        selectionMsgIdAttr: 'data-chatgpt-selection-message-id',
+        convIdAttr: 'data-chatgpt-selection-conversation-id',
+        scrollContainerNew: '.thread-scroll-container',
+
+        // ---------------------------------------------------------------------
+        // LEGACY UI — kept as a fallback so a staged rollout or rollback still
+        // resolves. The prompt-bar selectors were REMOVED in v1.9.2: ChatGPT's
+        // 2026-10 redesign deleted that UI entirely, so nothing can match them
+        // (live probes: [data-toc-item-index] → 0, `Prompt N` aria-labels → 0).
+        // ---------------------------------------------------------------------
         userMessage: '[data-message-author-role="user"]',
         assistantMessage: '[data-message-author-role="assistant"]',
         turnContainer: '[data-testid^="conversation-turn-"]',
         turnIdAttr: 'data-turn-id',
         messageIdAttr: 'data-message-id',
         stopButton: '[data-testid="stop-button"]',
-        // LIVE: real scroll container is div[class*="scrollbar-gutter"] (overflow:auto, 86093px)
-        // main has overflow:visible (not scrollable)
+        // LEGACY: real scroll container was div[class*="scrollbar-gutter"]
         scrollContainer: 'div[class*="scrollbar-gutter"]',
         scrollContainerFallback: 'main',
         scrollContainerAlt: 'div.\\@w-sm\\/main\\:\\[scrollbar-gutter\\:var\\(--stage-scroll-gutter\\)\\]',
@@ -77,25 +91,183 @@ window.TOC.safeChromeCall = function safeChromeCall(fn) {
 };
 
 // =============================================================================
+// Reverse-scroll helpers (new ChatGPT UI) — LIVE-VERIFIED 2026-10-10
+//
+// The new thread container is a `column-reverse` flex scroller. There the
+// native scrollTop range is [-maxTop, 0]: 0 = newest message, -maxTop = oldest.
+// Assigning a positive value (or scrollTo({top: >0})) is silently clamped and
+// does nothing — which is why every absolute-offset scroll, scan step and jump
+// in the legacy code became a no-op on the new UI.
+//
+// These helpers expose one logical axis — 0 = oldest, maxTop = newest — that
+// behaves identically in both layouts, so callers never branch on layout.
+// =============================================================================
+window.TOC.scroll = {
+    isReverse(el) {
+        try { return getComputedStyle(el).flexDirection === 'column-reverse'; } catch (e) { return false; }
+    },
+    maxTop(el) {
+        if (!el) return 0;
+        return Math.max(0, el.scrollHeight - el.clientHeight);
+    },
+    /** Logical offset of the current scroll position: 0 = oldest, maxTop = newest. */
+    getLogical(el) {
+        if (!el) return 0;
+        if (this.isReverse(el)) return el.scrollTop + this.maxTop(el);
+        return Math.max(0, el.scrollTop);
+    },
+    /** Scroll to a logical offset: 0 = oldest, maxTop = newest. */
+    setLogical(el, value) {
+        if (!el) return false;
+        const max = this.maxTop(el);
+        const clamped = Math.max(0, Math.min(max, value));
+        const top = this.isReverse(el) ? clamped - max : clamped;
+        el.scrollTo({ top, behavior: 'instant' });
+        return true;
+    },
+    /**
+     * Direction-agnostic nudge that centres `target` inside `el`.
+     * A viewport delta stays correct while the virtualizer rewrites scrollHeight,
+     * and — unlike absolute math — it moves the content the same way in normal
+     * and column-reverse containers (increasing scrollTop always scrolls toward
+     * newer content).
+     */
+    scrollByElement(el, target, block) {
+        if (!el || !target) return false;
+        try {
+            const cr = el.getBoundingClientRect();
+            const tr = target.getBoundingClientRect();
+            const delta = block === 'center'
+                ? (tr.top + tr.height / 2) - (cr.top + cr.height / 2)
+                : (tr.top - cr.top);
+            el.scrollTop += delta;
+            return true;
+        } catch (e) {
+            return false;
+        }
+    },
+};
+
+// =============================================================================
+// Active-thread DOM helpers (new ChatGPT UI) — see FINDINGS §4
+//
+// Turns live inside a single .thread-scroll-container, and each turn carries its
+// conversation id on a DESCENDANT [data-chatgpt-selection-conversation-id].
+// Every consumer must query turns through HERE: a document-wide
+// querySelectorAll('[data-turn-key]') also matches the OUTGOING thread while an
+// SPA swap is in flight, which is how the previous chat's turns leaked into the
+// new chat's store.
+//
+// NOTE: values in SELECTORS.chatgpt are a MIX of bare attribute names
+// (convIdAttr, turnKeyAttr, unitKeyAttr) and full selectors (turnContainerNew,
+// scrollContainerNew). Attribute names go inside [brackets]; full selectors must
+// NOT be wrapped again — doing so (`[[data-turn-key]]`) throws a SyntaxError that
+// aborts the whole script.
+// =============================================================================
+window.TOC.dom = {
+    /** The active conversation's id (URL-derived, never stale). */
+    convId() {
+        try {
+            return (window.TOC.ConversationIdentity && window.TOC.ConversationIdentity.getCurrentId()) || null;
+        } catch (e) {
+            return null;
+        }
+    },
+    /** Conversation ids owned by one container (used for matching). */
+    _containerConvIds(container) {
+        const sel = window.TOC.SELECTORS.chatgpt;
+        const out = new Set();
+        try {
+            container.querySelectorAll(`[${sel.convIdAttr}]`).forEach((el) => {
+                const v = el.getAttribute(sel.convIdAttr);
+                if (v) out.add(v);
+            });
+        } catch (e) { /* ignore */ }
+        return out;
+    },
+    /**
+     * The ACTIVE thread scroller.
+     *
+     * ChatGPT keeps the OUTGOING thread mounted (hidden, clientHeight 0) while
+     * the incoming one renders — so during a swap there are TWO
+     * .thread-scroll-container elements, and a plain querySelector returns the
+     * OLD one. Resolve by conversation id first, then visibility, then newest.
+     */
+    threadContainer() {
+        const sel = window.TOC.SELECTORS.chatgpt;
+        try {
+            const all = Array.from(document.querySelectorAll(sel.scrollContainerNew));
+            if (all.length === 0) return null;
+            if (all.length === 1) return all[0];
+            const convId = this.convId();
+            if (convId) {
+                const match = all.find((c) => this._containerConvIds(c).has(convId));
+                if (match) return match;
+            }
+            const visible = all.filter((c) => c.clientHeight > 0 || c.offsetParent !== null);
+            if (visible.length > 0) return visible[visible.length - 1];
+            return all[all.length - 1];
+        } catch (e) {
+            return null;
+        }
+    },
+    /**
+     * Turns belonging to the ACTIVE conversation, in DOM order.
+     * Returns [] when every mounted turn belongs to a DIFFERENT conversation:
+     * that is the leak case, and falling back to the unfiltered set is exactly
+     * how the outgoing chat's turns used to get merged into the new TOC.
+     */
+    activeTurns() {
+        const sel = window.TOC.SELECTORS.chatgpt;
+        try {
+            const root = this.threadContainer() || document;
+            const all = Array.from(root.querySelectorAll(sel.turnContainerNew));
+            if (all.length === 0) return [];
+            const convId = this.convId();
+            if (!convId) return all;
+            return all.filter((turn) => {
+                try {
+                    const el = turn.querySelector(`[${sel.convIdAttr}]`); // bare attr name — safe to wrap
+                    return !el || el.getAttribute(sel.convIdAttr) === convId;
+                } catch (e) {
+                    return true;
+                }
+            });
+        } catch (e) {
+            return [];
+        }
+    },
+};
+
+// =============================================================================
 // ConversationIdentity — SPA-aware (Trap 6, 16)
 // =============================================================================
 window.TOC.ConversationIdentity = (function () {
     let currentConvId = null;
     let currentUrl = location.href;
     let urlChangeCallbacks = [];
-    let titleObserver = null;
+    let headObserver = null; // watches <head> for SPA route swaps (cross-world)
     let historyPatched = false;
 
     function extractConversationId(url) {
         url = url || location.href;
         // /c/{id} or /share/{id}
-        let m = url.match(/\/c\/([a-f0-9-]+)/);
-        if (m) return m[1];
-        m = url.match(/\/share\/([a-f0-9-]+)/);
-        if (m) return m[1];
-        // Fallback: try DOM
-        const turn = document.querySelector('[data-turn-id]');
-        if (turn) return turn.getAttribute('data-turn-id');
+        try {
+            let m = url.match(/\/c\/([a-f0-9-]+)/);
+            if (m) return m[1];
+            m = url.match(/\/share\/([a-f0-9-]+)/);
+            if (m) return m[1];
+        } catch (e) { /* fall through to null */ }
+        // No id in the URL (brand-new chat, /gpts, settings, …) → return null and
+        // let callers key the store on location.href.
+        //
+        // Do NOT fall back to the DOM. During an SPA swap the OUTGOING thread is
+        // often still mounted, so a DOM-derived id is the PREVIOUS conversation's
+        // id — getCurrentId() then never changes, the store is never reset, and
+        // chat A's messages leak into chat B's TOC. The old DOM fallback also
+        // built `[[data-turn-key]]` (a selector wrapped in brackets a second
+        // time), which threw a SyntaxError on every no-id page load and aborted
+        // all of store.js — that is what killed SPA chat switching entirely.
         return null;
     }
 
@@ -162,21 +334,45 @@ window.TOC.ConversationIdentity = (function () {
         };
         patch('pushState');
         patch('replaceState');
+
+        // --- Cross-world detection (the ONLY reliable channels) -----------------
+        // DOM objects — including `history` — get a SEPARATE JS wrapper per world,
+        // so the expando patches above are invisible to page scripts: a site
+        // router calling its own history.pushState never reaches them. Verified
+        // live 2026-10-10: a main-world probe caught the router's pushState while
+        // the isolated-world patch never fired, so SPA chat switches went
+        // completely unnoticed (TOC kept the previous chat's rows forever).
+
+        // 1. DOM events are shared across worlds → back/forward works.
         window.addEventListener('popstate', emitLocationChange);
         window.addEventListener('hashchange', emitLocationChange);
         window.addEventListener('toc-locationchange', checkAndEmit);
 
-        // Title observer fallback
-        const titleEl = document.querySelector('title');
-        if (titleEl) {
-            titleObserver = new MutationObserver(() => checkAndEmit());
-            titleObserver.observe(titleEl, { childList: true });
-        }
+        // 2. Poll location.href — it IS shared, so it always reflects router
+        //    pushes. A string compare every 500 ms is effectively free.
+        setInterval(() => {
+            try { checkAndEmit(); } catch (e) { /* ignore */ }
+        }, 500);
+
+        // 3. The route change swaps <title> and the thread DOM; watching <head>
+        //    gets us on the same frame as the navigation when possible.
+        try {
+            if (!headObserver) {
+                headObserver = new MutationObserver(() => {
+                    try { checkAndEmit(); } catch (e) { /* ignore */ }
+                });
+                headObserver.observe(document.head || document.documentElement, {
+                    childList: true, subtree: true, characterData: true,
+                });
+            }
+        } catch (e) { /* ignore */ }
     }
 
-    // Init
-    currentConvId = extractConversationId(location.href);
-    installHistoryHooks();
+    // Init — never let id resolution or hook installation abort store.js: doing
+    // so would take MessageStore + StoreManager + the main.js router down with
+    // it, and the extension would stay dead for the whole page session.
+    try { currentConvId = extractConversationId(location.href); } catch (e) { currentConvId = null; }
+    try { installHistoryHooks(); } catch (e) { /* ignore */ }
 
     return {
         extractConversationId,
@@ -201,6 +397,49 @@ window.TOC.MessageStore = class MessageStore {
         this.uuidSet = new Set(); // for change detection (Trap 12)
         this.promptBarIndexMap = new Map(); // promptBarIndex -> id
         this.isFullyScanned = false; // persistent-cache scan state (provisional C1/C6 vs full C3/C7)
+        // NEW UI (v1.9.2): total messages in the API's linear branch. Together with
+        // per-message apiIndex this gives the Navigator an exact ratio jump.
+        this.apiTotal = null;
+        // id → API branch position, published by C3 (see setChainIndex). Every
+        // record added/updated afterwards is stamped automatically, so records that
+        // C6/C7 discover AFTER the API merge still get an exact position. Without
+        // this the sort comparator mixes positioned and position-less records and
+        // the list order (and navigation) breaks.
+        this.chainIndexById = null;
+    }
+
+    /** C3 publishes its id → branch-position map here (see fetchAndMerge). */
+    setChainIndex(map) {
+        this.chainIndexById = (map && typeof map.get === 'function') ? map : null;
+    }
+
+    /** Fill in apiIndex from the published chain map when it is still unknown. */
+    _stampApiIndex(rec) {
+        try {
+            if (!rec || !this.chainIndexById) return rec;
+            if (rec.apiIndex !== null && rec.apiIndex !== undefined) return rec;
+            let idx = null;
+            if (rec.id && this.chainIndexById.has(rec.id)) idx = this.chainIndexById.get(rec.id);
+            else if (rec.messageId && this.chainIndexById.has(rec.messageId)) idx = this.chainIndexById.get(rec.messageId);
+            if (idx !== null && idx !== undefined) rec.apiIndex = idx;
+        } catch (e) { /* ignore */ }
+        return rec;
+    }
+
+    /**
+     * API branch position for a raw DOM message id (C3's published table).
+     * The Navigator uses this to locate the MOUNTED window without needing a
+     * store record — mounted turns are not always in the store (C6 only adds what
+     * it has scanned), and the DOM's own turn numbers are LOCAL to the render
+     * window (they restart at 0), so they cannot order the conversation.
+     */
+    positionOfId(id) {
+        try {
+            if (!id || !this.chainIndexById) return null;
+            return this.chainIndexById.has(id) ? this.chainIndexById.get(id) : null;
+        } catch (e) {
+            return null;
+        }
     }
 
     /**
@@ -222,6 +461,12 @@ window.TOC.MessageStore = class MessageStore {
             if (existing.promptBarIndex !== undefined && existing.promptBarIndex !== null) {
                 merged.promptBarIndex = existing.promptBarIndex;
             }
+            // Never downgrade an exact API position to null
+            if ((merged.apiIndex === null || merged.apiIndex === undefined) &&
+                existing.apiIndex !== undefined && existing.apiIndex !== null) {
+                merged.apiIndex = existing.apiIndex;
+            }
+            this._stampApiIndex(merged);
             this.messages.set(msg.id, merged);
             return merged;
         }
@@ -229,6 +474,9 @@ window.TOC.MessageStore = class MessageStore {
         const normalized = {
             id: msg.id,
             role: msg.role || 'user',
+            // NEW UI (v1.9.2): position in the API's linear branch (0 = oldest).
+            // null until C3 has merged the conversation.
+            apiIndex: (msg.apiIndex !== undefined && msg.apiIndex !== null) ? msg.apiIndex : null,
             text: msg.text || '',
             isTruncated: !!msg.isTruncated,
             promptBarIndex: msg.promptBarIndex !== undefined ? msg.promptBarIndex : null,
@@ -240,21 +488,74 @@ window.TOC.MessageStore = class MessageStore {
             turnNumber: msg.turnNumber !== undefined ? msg.turnNumber : null,
             answerText: msg.answerText || '', // for backward compat, but not element
         };
+        this._stampApiIndex(normalized);
         this.messages.set(msg.id, normalized);
         this.order.push(msg.id);
         this.uuidSet.add(msg.id);
         if (normalized.promptBarIndex !== null) {
             this.promptBarIndexMap.set(normalized.promptBarIndex, msg.id);
         }
+        // Keep the list chronological. Records added AFTER the C3 merge (C6/C7
+        // findings, live messages) used to sit unsorted at the tail: the visual
+        // order broke and the Navigator's position signals went with it
+        // (live evidence: positions [0..142, 239, 222, 224, 226, 228]).
+        this.sort();
         return normalized;
     }
 
+    /**
+     * Update fields of an existing record.
+     * Never downgrades an exact API position (apiIndex) back to null.
+     */
     update(id, data) {
         const existing = this.messages.get(id);
         if (!existing) return null;
         const updated = { ...existing, ...data };
+        if ((updated.apiIndex === null || updated.apiIndex === undefined) &&
+            existing.apiIndex !== undefined && existing.apiIndex !== null) {
+            updated.apiIndex = existing.apiIndex;
+        }
+        this._stampApiIndex(updated);
         this.messages.set(id, updated);
         return updated;
+    }
+
+    /**
+     * Rename a record's id in place, keeping every index in sync (messages map,
+     * order array, uuidSet, promptBarIndexMap). Used when C3 upgrades a record
+     * that C6 had keyed under a different id — doing this wrongly is what turned
+     * an upgrade into a duplicate row (and left the mounted record without the
+     * apiIndex the Navigator needs).
+     */
+    _migrateId(oldId, newId) {
+        if (!oldId || !newId || oldId === newId) return false;
+        const rec = this.messages.get(oldId);
+        if (!rec) return false;
+        if (this.messages.has(newId)) {
+            // Target id already exists (a previous partial merge) — drop the old
+            // record rather than overwriting live data, and clear any map entries
+            // still pointing at it so getByPromptBarIndex() can't return undefined.
+            this.messages.delete(oldId);
+            this.order = this.order.filter(id => id !== oldId);
+            this.uuidSet.delete(oldId);
+            try {
+                for (const [k, v] of this.promptBarIndexMap) {
+                    if (v === oldId) this.promptBarIndexMap.delete(k);
+                }
+            } catch (e) { /* ignore */ }
+            return true;
+        }
+        this.messages.delete(oldId);
+        this.messages.set(newId, { ...rec, id: newId });
+        this.order = this.order.map(id => (id === oldId ? newId : id));
+        this.uuidSet.delete(oldId);
+        this.uuidSet.add(newId);
+        try {
+            for (const [k, v] of this.promptBarIndexMap) {
+                if (v === oldId) this.promptBarIndexMap.set(k, newId);
+            }
+        } catch (e) { /* ignore */ }
+        return true;
     }
 
     /**
@@ -285,54 +586,103 @@ window.TOC.MessageStore = class MessageStore {
 
         console.log(`[TOC Store] Merging C3: ${visibleUserMessages.length} user + ${assistantMessages.length} assistant (from ${c3Messages.length} total)`);
 
-        // Map C1 stubs by index to C3 user messages by index + text prefix validation
+        // Upgrade user messages into existing records: exact UUID → legacy prompt-bar
+        // stub → TEXT PREFIX.
+        //
+        // The text stage is essential on the new UI: C6 can key a message under a
+        // different id than the API does (units carrying several ids, attachments),
+        // and without it the merge ADDS a duplicate row while leaving the mounted
+        // record without an apiIndex — which silently kills the ratio/direction
+        // signal of the Navigator (live diagnostics: window=[?,?] target=142).
         visibleUserMessages.forEach((c3Msg, idx) => {
-            const stubId = this.promptBarIndexMap.get(idx);
-            if (stubId) {
-                const stub = this.messages.get(stubId);
-                if (stub) {
-                    // Validate by text prefix (first 30 chars)
-                    const stubPrefix = (stub.text || '').slice(0, 30).toLowerCase();
-                    const c3Prefix = (c3Msg.text || '').slice(0, 30).toLowerCase();
-                    const isMatch = stubPrefix && c3Prefix && stubPrefix === c3Prefix;
-                    if (!isMatch && stub.text && c3Msg.text) {
-                        console.warn(`[TOC Store] C1/C3 mismatch at index ${idx}: stub="${stubPrefix}" vs c3="${c3Prefix}"`);
-                    }
-                    // Upgrade stub with full data
-                    this.update(stubId, {
-                        text: c3Msg.text,
-                        isTruncated: false,
-                        id: c3Msg.id || stubId, // prefer C3 stable UUID
-                        messageId: c3Msg.messageId || c3Msg.id,
-                        turnId: c3Msg.turnId || stub.turnId,
-                        createTime: c3Msg.createTime,
-                        source: 'c3',
-                    });
-                    // If id changed, update maps
-                    if (c3Msg.id && c3Msg.id !== stubId) {
-                        const oldMsg = this.messages.get(stubId);
-                        this.messages.delete(stubId);
-                        this.messages.set(c3Msg.id, { ...oldMsg, id: c3Msg.id });
-                        this.order = this.order.map(id => id === stubId ? c3Msg.id : id);
-                        this.uuidSet.delete(stubId);
-                        this.uuidSet.add(c3Msg.id);
-                        this.promptBarIndexMap.set(idx, c3Msg.id);
-                    }
-                }
-            } else {
-                // No stub for this index — add as new
-                this.add({
-                    id: c3Msg.id || `c3-user-${idx}`,
-                    role: 'user',
+            const apiIndex = (c3Msg.apiIndex !== undefined) ? c3Msg.apiIndex : null;
+            // 1. Exact UUID match — C6 keys most new-UI records by the API's own id.
+            if (c3Msg.id && this.messages.has(c3Msg.id)) {
+                this.update(c3Msg.id, {
                     text: c3Msg.text,
                     isTruncated: false,
-                    promptBarIndex: idx,
-                    turnId: c3Msg.turnId,
-                    messageId: c3Msg.messageId || c3Msg.id,
-                    createTime: c3Msg.createTime,
+                    apiIndex,
                     source: 'c3',
                 });
+                return;
             }
+            // 2. Legacy prompt-bar stub for this index.
+            const stubId = this.promptBarIndexMap.get(idx);
+            const stub = stubId ? this.messages.get(stubId) : null;
+            if (stub) {
+                // Validate by text prefix (first 30 chars)
+                const stubPrefix = (stub.text || '').slice(0, 30).toLowerCase();
+                const c3Prefix = (c3Msg.text || '').slice(0, 30).toLowerCase();
+                const isMatch = stubPrefix && c3Prefix && stubPrefix === c3Prefix;
+                if (!isMatch && stub.text && c3Msg.text) {
+                    console.warn(`[TOC Store] C1/C3 mismatch at index ${idx}: stub="${stubPrefix}" vs c3="${c3Prefix}"`);
+                }
+                // Upgrade stub with full data
+                this.update(stubId, {
+                    text: c3Msg.text,
+                    isTruncated: false,
+                    id: c3Msg.id || stubId, // prefer C3 stable UUID
+                    messageId: c3Msg.messageId || c3Msg.id,
+                    turnId: c3Msg.turnId || stub.turnId,
+                    createTime: c3Msg.createTime,
+                    apiIndex,
+                    source: 'c3',
+                });
+                // If id changed, update maps
+                if (c3Msg.id && c3Msg.id !== stubId) {
+                    this._migrateId(stubId, c3Msg.id);
+                    this.promptBarIndexMap.set(idx, c3Msg.id);
+                }
+                return;
+            }
+            // 3. Text-prefix match against a C6-accumulated record.
+            const c3Prefix = (c3Msg.text || '').slice(0, 30).toLowerCase();
+            let matched = null;
+            if (c3Prefix && c3Prefix.length > 10) {
+                for (const m of this.getAll()) {
+                    if (m.role !== 'user') continue;
+                    if (m.id.startsWith('c3-')) continue; // already a C3 record
+                    const existingPrefix = (m.text || '').slice(0, 30).toLowerCase();
+                    if (!existingPrefix || existingPrefix.length <= 10) continue;
+                    if (existingPrefix === c3Prefix) {
+                        matched = m;
+                        break;
+                    }
+                    // Attachment/streaming case: C6 holds a shorter prefix.
+                    if (!m.text.startsWith('[Attachment') &&
+                        c3Msg.text.startsWith(m.text) && m.text.length > 10) {
+                        matched = m;
+                        break;
+                    }
+                }
+            }
+            if (matched) {
+                const oldId = matched.id;
+                this.update(oldId, {
+                    text: c3Msg.text,
+                    isTruncated: false,
+                    messageId: c3Msg.messageId || c3Msg.id,
+                    turnId: c3Msg.turnId || matched.turnId,
+                    createTime: c3Msg.createTime,
+                    apiIndex,
+                    source: 'c3',
+                });
+                if (c3Msg.id && c3Msg.id !== oldId) this._migrateId(oldId, c3Msg.id);
+                return;
+            }
+            // 4. Genuinely new message.
+            this.add({
+                id: c3Msg.id || `c3-user-${idx}`,
+                role: 'user',
+                text: c3Msg.text,
+                isTruncated: false,
+                promptBarIndex: idx,
+                turnId: c3Msg.turnId,
+                messageId: c3Msg.messageId || c3Msg.id,
+                apiIndex,
+                createTime: c3Msg.createTime,
+                source: 'c3',
+            });
         });
 
         // Add assistant messages: match by stable UUID first; otherwise match a
@@ -342,8 +692,9 @@ window.TOC.MessageStore = class MessageStore {
         // C6 geometry (offsetTop/turnNumber) is preserved — the API has none.
         assistantMessages.forEach((aMsg, idx) => {
             const targetId = aMsg.id || `c3-assistant-${idx}`;
+            const apiIndex = (aMsg.apiIndex !== undefined) ? aMsg.apiIndex : null;
             if (this.messages.has(targetId)) {
-                this.update(targetId, { text: aMsg.text, isTruncated: false, source: 'c3' });
+                this.update(targetId, { text: aMsg.text, isTruncated: false, apiIndex, source: 'c3' });
                 return;
             }
             const c3Prefix = (aMsg.text || '').slice(0, 30).toLowerCase();
@@ -373,6 +724,7 @@ window.TOC.MessageStore = class MessageStore {
                     text: aMsg.text,
                     isTruncated: false,
                     messageId: aMsg.messageId || aMsg.id,
+                    apiIndex,
                     createTime: aMsg.createTime,
                     source: 'c3',
                 });
@@ -395,11 +747,11 @@ window.TOC.MessageStore = class MessageStore {
                     promptBarIndex: null,
                     turnId: aMsg.turnId,
                     messageId: aMsg.messageId || aMsg.id,
-                    createTime: aMsg.createTime,
+                    apiIndex,
                     source: 'c3',
                 });
             } else {
-                this.update(targetId, { text: aMsg.text, isTruncated: false, source: 'c3' });
+                this.update(targetId, { text: aMsg.text, isTruncated: false, apiIndex, source: 'c3' });
             }
         });
 
@@ -412,6 +764,12 @@ window.TOC.MessageStore = class MessageStore {
             const ma = this.messages.get(a);
             const mb = this.messages.get(b);
             if (!ma || !mb) return 0;
+
+            // 0. NEW UI: exact API branch position (C3-merged records). This is the
+            // authoritative conversation order — prefer it over every heuristic.
+            if (ma.apiIndex !== null && ma.apiIndex !== undefined && mb.apiIndex !== null && mb.apiIndex !== undefined) {
+                return ma.apiIndex - mb.apiIndex;
+            }
 
             // 1. Sort by turnNumber if both have it (turn 1, 2, 3...)
             if (ma.turnNumber !== null && ma.turnNumber !== undefined && mb.turnNumber !== null && mb.turnNumber !== undefined) {
@@ -487,7 +845,9 @@ window.TOC.MessageStore = class MessageStore {
         this.messages.clear();
         this.order = [];
         this.uuidSet.clear();
+        this.chainIndexById = null;
         this.promptBarIndexMap.clear();
+        this.apiTotal = null;
         this.isFullyScanned = false;
         console.log(`[TOC Store] Reset for ${this.conversationId}`);
     }
@@ -503,6 +863,7 @@ window.TOC.MessageStore = class MessageStore {
             text: m.text,
             isTruncated: !!m.isTruncated,
             promptBarIndex: (m.promptBarIndex !== undefined && m.promptBarIndex !== null) ? m.promptBarIndex : null,
+            apiIndex: (m.apiIndex !== undefined && m.apiIndex !== null) ? m.apiIndex : null,
             turnId: m.turnId || null,
             messageId: m.messageId || null,
             turnNumber: (m.turnNumber !== undefined && m.turnNumber !== null) ? m.turnNumber : null,
@@ -512,8 +873,9 @@ window.TOC.MessageStore = class MessageStore {
             source: m.source || 'c6',
         }));
         return {
-            schemaVersion: 1,
+            schemaVersion: 2, // v1.9.2: v1 records could hold duplicate message pairs
             convId: this.conversationId,
+            apiTotal: (typeof this.apiTotal === 'number') ? this.apiTotal : null,
             isFullyScanned: !!this.isFullyScanned,
             userTurnCount: this.getUserMessages().length,
             messages,
@@ -534,12 +896,13 @@ window.TOC.MessageStore = class MessageStore {
      * Returns number of restored messages (0 on invalid input).
      */
     hydrate(cachedData) {
-        if (!cachedData || cachedData.schemaVersion !== 1 || !Array.isArray(cachedData.messages)) return 0;
+        if (!cachedData || cachedData.schemaVersion !== 2 || !Array.isArray(cachedData.messages)) return 0;
         this.messages.clear();
         this.order = [];
         this.uuidSet.clear();
         this.promptBarIndexMap.clear();
         if (cachedData.convId) this.conversationId = cachedData.convId;
+        this.apiTotal = (typeof cachedData.apiTotal === 'number') ? cachedData.apiTotal : null;
         this.isFullyScanned = !!cachedData.isFullyScanned;
         let restored = 0;
         for (const raw of cachedData.messages) {
@@ -550,6 +913,7 @@ window.TOC.MessageStore = class MessageStore {
                 text: raw.text || '',
                 isTruncated: !!raw.isTruncated,
                 promptBarIndex: (raw.promptBarIndex !== undefined && raw.promptBarIndex !== null) ? raw.promptBarIndex : null,
+                apiIndex: (raw.apiIndex !== undefined && raw.apiIndex !== null) ? raw.apiIndex : null,
                 turnId: raw.turnId || null,
                 messageId: raw.messageId || null,
                 turnNumber: (raw.turnNumber !== undefined && raw.turnNumber !== null) ? raw.turnNumber : null,
@@ -599,6 +963,7 @@ window.TOC.MessageStore = class MessageStore {
                 role,
                 text,
                 isTruncated: !!raw.isTruncated,
+                apiIndex: (raw.apiIndex !== undefined && raw.apiIndex !== null) ? raw.apiIndex : null,
                 promptBarIndex: (raw.promptBarIndex !== undefined && raw.promptBarIndex !== null) ? raw.promptBarIndex : null,
                 turnId: raw.turnId || null,
                 messageId: raw.messageId || id,
@@ -732,6 +1097,7 @@ window.TOC.StoreManager = (function () {
                     role: m.role,
                     text: m.text || '',
                     isTruncated: !!m.isTruncated,
+                    apiIndex: (m.apiIndex !== undefined && m.apiIndex !== null) ? m.apiIndex : null,
                     promptBarIndex: (m.promptBarIndex !== undefined && m.promptBarIndex !== null) ? m.promptBarIndex : null,
                     turnId: m.turnId || null,
                     messageId: m.messageId || null,
@@ -745,8 +1111,9 @@ window.TOC.StoreManager = (function () {
             // JSON-safe deep copy so later store mutations can't affect a queued save
             const safeMessages = JSON.parse(JSON.stringify(messages));
             return {
-                schemaVersion: 1,
+                schemaVersion: 2,
                 convId: snap.convId || (storeOrSnapshot && storeOrSnapshot.conversationId) || null,
+                apiTotal: (typeof snap.apiTotal === 'number') ? snap.apiTotal : null,
                 isFullyScanned: !!(isFullyScanned !== undefined ? isFullyScanned : snap.isFullyScanned),
                 userTurnCount: safeMessages.filter((m) => m.role === 'user').length,
                 messages: safeMessages,
@@ -797,7 +1164,7 @@ window.TOC.StoreManager = (function () {
             if (!adapter) return null;
             const items = await adapter.get([recordKey(convId), INDEX_KEY]);
             const record = items && items[recordKey(convId)];
-            if (!record || record.schemaVersion !== 1) return null;
+            if (!record || record.schemaVersion !== 2) return null;
             if (record.convId !== convId) return null;
             if (!Array.isArray(record.messages)) return null;
             // Touch LRU on valid hit (fire-and-forget ordering: await to keep index consistent)
@@ -845,9 +1212,13 @@ window.TOC.StoreManager = (function () {
                         // Stale-generation check immediately before writing
                         if (session && !isSessionCurrent(session)) return { skipped: 'stale-generation' };
                         const record = {
-                            schemaVersion: 1,
+                            schemaVersion: 2,
                             convId,
                             isFullyScanned: true,
+                            // Keep the branch length: without it a reload loses the
+                            // Navigator's ratio-jump denominator (invariant #10).
+                            apiTotal: (typeof snapshot.apiTotal === 'number') ? snapshot.apiTotal
+                                : (typeof rec.apiTotal === 'number' ? rec.apiTotal : null),
                             userTurnCount: merged.filter((m) => m.role === 'user').length,
                             messages: merged,
                             savedAt: Date.now(),
@@ -864,9 +1235,11 @@ window.TOC.StoreManager = (function () {
                 /* proceed to write */
             }
             const record = {
-                schemaVersion: 1,
+                schemaVersion: 2,
                 convId,
                 isFullyScanned: full,
+                // Persist the API branch length so a reload keeps exact ratio jumps.
+                apiTotal: (typeof snapshot.apiTotal === 'number') ? snapshot.apiTotal : null,
                 userTurnCount: snapshot.userTurnCount,
                 messages: snapshot.messages,
                 savedAt: Date.now(),
@@ -917,6 +1290,13 @@ window.TOC.StoreManager = (function () {
                 if (!inc || !inc.id) continue;
                 const cur = byId.get(inc.id);
                 if (cur) {
+                    // Carry the exact API position independently of the text upgrade:
+                    // positions are learned AFTER the text (C3 runs behind C6), so the
+                    // text-length condition below would otherwise drop them on save.
+                    if (inc.apiIndex !== null && inc.apiIndex !== undefined && cur.apiIndex !== inc.apiIndex) {
+                        cur.apiIndex = inc.apiIndex;
+                        changed = true;
+                    }
                     const curLen = (cur.text || '').length;
                     const incLen = (inc.text || '').length;
                     if (incLen > curLen || (cur.isTruncated && !inc.isTruncated && incLen >= curLen)) {

@@ -1,13 +1,18 @@
 /**
- * AI Chat TOC - Virtual Module (v1.9.0)
- * C1 (prompt bars) + C6 (DOM accumulator) + C7 (scroll scan) + Navigator + C3 experimental
+ * AI Chat TOC - Virtual Module (v1.9.2)
+ * C3 (conversation API) + C6 (DOM accumulator) + C7 (scroll scan) + Navigator
  * Optimized 2-file architecture: store.js + virtual.js
- * Live-verified 2026-08-30 on share/6a0cc811 (18 prompts, 36 msgs, 86k height)
- * - C1: [data-toc-item-index] 18/18 in 0.1ms, aria-label holds truncated text (no hover)
- * - C7: div[class*="scrollbar-gutter"] is real scroll container (86093px), not main
- * - C7: behavior:'instant' + double rAF 12.2ms/step, reverse illusion confirmed (height -16)
- * - Nav: bar 9 0->44828 in 583ms, need 300ms+ wait for assistant mount
- * - C3: /share/ 200 in 3.3s, 75 nodes -> 36 msgs (26 system hidden)
+ *
+ * C1 (prompt bars) was DELETED in v1.9.2 — ChatGPT's 2026-10 redesign removed its
+ * own prompt-navigation UI, so the scanner could never match anything again.
+ *
+ * Live-verified 2026-10-11 on the new UI (264-message chat):
+ * - C3: plain /backend-api/conversation/<id> first (the include_full_conversation
+ *   variant 403s), 264-node mapping -> apiIndex stamped on every record
+ * - C6: scoped to the ACTIVE thread (two containers coexist during a swap)
+ * - C7: event-driven waits + adaptive step, ~8-15s on a 16k px thread
+ * - Nav: mounted/nearby targets resolve in 0-1500ms; far targets in a huge chat may
+ *   exhaust the 12s budget (documented limitation, FINDINGS.md PART 6)
  */
 window.TOC = window.TOC || {};
 
@@ -68,10 +73,22 @@ window.TOC.Virtual = (function () {
         return document.querySelector(selector);
     };
     const findScrollContainer = (siteKey) => {
-        // ChatGPT LIVE: div[class*="scrollbar-gutter"] is real (overflow:auto, 86093px)
         if (siteKey === 'chatgpt') {
             const sel = SELECTORS.chatgpt;
-            let el = document.querySelector(sel.scrollContainer);
+            const scroll = window.TOC.scroll;
+            // NEW UI (2026-10): .thread-scroll-container is the thread scroller
+            // (column-reverse). Accept it at any size — the legacy >5000px
+            // heuristic below would reject a short thread and fall back to `main`,
+            // which is not scrollable.
+            // Resolve through TOC.dom, which skips the OUTGOING (hidden) thread
+            // that stays mounted next to the incoming one during a chat swap.
+            let el = (window.TOC.dom && window.TOC.dom.threadContainer)
+                ? window.TOC.dom.threadContainer()
+                : document.querySelector(sel.scrollContainerNew);
+            if (el && scroll && scroll.maxTop(el) > 0) return el;
+            if (el && el.scrollHeight >= el.clientHeight) return el;
+            // LEGACY UI
+            el = document.querySelector(sel.scrollContainer);
             if (el && getComputedStyle(el).overflowY === 'auto' && el.scrollHeight > 5000) return el;
             // Try alt selector
             el = document.querySelector(sel.scrollContainerAlt);
@@ -99,69 +116,14 @@ window.TOC.Virtual = (function () {
     // C1: Prompt Bar Scanner (ChatGPT only, conditional)
     // Fix: Handle both "Prompt N" and truncated text in aria-label
     // -------------------------------------------------------------------------
-    const C1 = {
-        scan(session) {
-            // Stale SPA navigation: never populate the new chat's store with old data
-            if (session && !isCurrentSession(session)) return 0;
-            const store = StoreManager.getStore();
-            const sel = SELECTORS.chatgpt;
-            let bars = document.querySelectorAll(sel.promptBar);
-            if (bars.length === 0) {
-                bars = document.querySelectorAll(sel.promptBarFallback);
-            }
-            if (bars.length === 0) {
-                console.log('[TOC C1] No prompt bars (small chat) — skip, rely on C6');
-                return 0;
-            }
-            console.log(`[TOC C1] Found ${bars.length} prompt bars`);
-            let added = 0;
-            let updated = 0;
-            bars.forEach(bar => {
-                const idxStr = bar.getAttribute('data-toc-item-index');
-                const idx = idxStr !== null ? parseInt(idxStr, 10) : -1;
-                if (idx < 0 || isNaN(idx)) return;
-                const rawAria = (bar.getAttribute(sel.promptBarTextAttr) || bar.getAttribute('aria-label') || '').trim();
-                // Fix: aria-label may be "Prompt N" (new) or truncated text (old) — handle both
-                const isPromptN = /^Prompt \d+$/i.test(rawAria);
-                const truncated = isPromptN ? '' : rawAria;
-                const text = truncated || `Prompt ${idx + 1}`;
-                const isTruncated = !isPromptN && truncated.length > 0;
-                // Use stable id based on index only (not text) to avoid duplicates when text changes
-                const id = `c1-${idx}`;
-                const existing = store.getByPromptBarIndex(idx);
-                if (!existing) {
-                    store.add({
-                        id,
-                        role: 'user',
-                        text,
-                        isTruncated,
-                        promptBarIndex: idx,
-                        turnId: null,
-                        messageId: null,
-                        source: 'c1',
-                    });
-                    added++;
-                } else {
-                    // Update if we now have real text and existing is placeholder
-                    if (existing.text.startsWith('Prompt ') && truncated && !isPromptN) {
-                        store.update(existing.id, { text: truncated, isTruncated });
-                        updated++;
-                    } else if (existing.isTruncated && truncated && existing.text !== truncated && !isPromptN) {
-                        store.update(existing.id, { text: truncated, isTruncated });
-                        updated++;
-                    }
-                }
-            });
-            console.log(`[TOC C1] Added ${added}, updated ${updated}, total store: ${store.size()}`);
-            return bars.length;
-        },
-        getCount() {
-            const sel = SELECTORS.chatgpt;
-            let bars = document.querySelectorAll(sel.promptBar);
-            if (bars.length === 0) bars = document.querySelectorAll(sel.promptBarFallback);
-            return bars.length;
-        }
-    };
+    // C1 (prompt-bar scanner) — REMOVED in v1.9.2.
+    //
+    // ChatGPT's 2026-10 redesign deleted its own prompt-navigation UI entirely:
+    // live probes for [data-toc-item-index], `aria-label="Prompt N"` and the
+    // hover popover all return 0 matches, so this scanner could never find
+    // anything. C3 (API) + C6 (DOM) are the outline sources now. The module is
+    // gone rather than left inert so no future update re-enables dead work.
+    // -------------------------------------------------------------------------
 
     // -------------------------------------------------------------------------
     // C6: DOM Accumulator (All platforms, always-on)
@@ -228,6 +190,111 @@ window.TOC.Virtual = (function () {
             let found = 0;
 
             if (key === 'chatgpt') {
+                // -----------------------------------------------------------------
+                // NEW UI (LIVE-VERIFIED 2026-10-10)
+                // Turns are [data-turn-key] wrappers holding a [data-user-message-bubble]
+                // and/or a [data-markdown-text-style="assistant-message"] body. Message
+                // IDs come from the per-unit search registry when present; otherwise the
+                // turn UUID is used, which is stable across virtualization.
+                // Legacy prompt bars/index mapping do not exist here.
+                // -----------------------------------------------------------------
+                // Scoped to the ACTIVE conversation (never document-wide) so a
+                // still-mounted outgoing thread cannot leak into this store.
+                const newTurns = (window.TOC.dom && window.TOC.dom.activeTurns)
+                    ? window.TOC.dom.activeTurns()
+                    : document.querySelectorAll(sel.turnContainerNew);
+                if (newTurns.length > 0) {
+                    const firstIdOf = (unit) => {
+                        if (!unit) return null;
+                        const raw = unit.getAttribute(sel.unitMsgIdsAttr);
+                        return raw ? (raw.trim().split(/\s+/)[0] || null) : null;
+                    };
+                    newTurns.forEach(turn => {
+                        const turnKey = turn.getAttribute(sel.turnKeyAttr);
+                        if (!turnKey) return;
+                        const offsetTop = turn.offsetTop;
+                        const userUnit = turn.querySelector(`[${sel.unitKeyAttr}$=":user"]`);
+                        const assistantUnit = turn.querySelector(`[${sel.unitKeyAttr}$=":assistant"]`);
+                        const userEl = turn.querySelector(sel.userMessageNew) || userUnit;
+                        const assistantEl = turn.querySelector(sel.assistantMessageNew) || assistantUnit;
+
+                        if (userEl) {
+                            const userMsgId = firstIdOf(userUnit);
+                            const text = userEl.textContent.trim() || '[Attachment]';
+                            const id = userMsgId || `${turnKey}:user`;
+                            if (!store.has(id)) {
+                                store.add({
+                                    id,
+                                    role: 'user',
+                                    text,
+                                    isTruncated: false,
+                                    promptBarIndex: null,
+                                    turnId: turnKey,
+                                    messageId: userMsgId,
+                                    offsetTop,
+                                    // DOM turn index (fallback-turn-N): always present and
+                                    // an ordering signal the Navigator can trust even when
+                                    // no store record resolves for a mounted turn.
+                                    turnNumber: turnNumberFromEl(turn),
+                                    source: 'c6',
+                                });
+                                found++;
+                            } else {
+                                const existing = store.getById(id);
+                                if (existing) {
+                                    // Backfill ids/geometry the first time this record is seen,
+                                    // and upgrade the text whenever the DOM now holds more of
+                                    // it (the record may have been added from a stub/API merge).
+                                    const patch = {
+                                        turnId: turnKey,
+                                        messageId: userMsgId,
+                                        offsetTop,
+                                        turnNumber: turnNumberFromEl(turn),
+                                    };
+                                    if (text.length > (existing.text || '').length) patch.text = text;
+                                    const geometryMissing = existing.turnNumber === null || existing.turnNumber === undefined
+                                        || existing.offsetTop === null || existing.offsetTop === undefined;
+                                    if (geometryMissing || patch.text !== undefined) {
+                                        store.update(id, patch);
+                                    }
+                                }
+                            }
+                        }
+                        if (assistantEl) {
+                            const assistantMsgId = firstIdOf(assistantUnit);
+                            const text = assistantEl.textContent.trim();
+                            if (text) {
+                                const id = assistantMsgId || `${turnKey}:assistant`;
+                                if (!store.has(id)) {
+                                    store.add({
+                                        id,
+                                        role: 'assistant',
+                                        text,
+                                        isTruncated: false,
+                                        promptBarIndex: null,
+                                        turnId: turnKey,
+                                        messageId: assistantMsgId,
+                                        offsetTop,
+                                        turnNumber: turnNumberFromEl(turn),
+                                        source: 'c6',
+                                    });
+                                    found++;
+                                } else {
+                                    const existing = store.getById(id);
+                                    if (existing && text.length > (existing.text || '').length) {
+                                        store.update(id, { text, offsetTop, turnId: turnKey, messageId: assistantMsgId });
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    if (found > 0) console.log(`[TOC C6] (new UI) Scanned ${found} new messages, total: ${store.size()}`);
+                    return found;
+                }
+
+                // -----------------------------------------------------------------
+                // LEGACY UI
+                // -----------------------------------------------------------------
                 // ChatGPT: use turn containers with data-testid
                 const turns = document.querySelectorAll(sel.turnContainer);
                 turns.forEach(turn => {
@@ -601,6 +668,56 @@ window.TOC.Virtual = (function () {
     })();
 
     // -------------------------------------------------------------------------
+    // Window helpers (v1.9.2) — shared by the C7 scan and the virtual-jump engine.
+    // `turnNumberFromEl` / `windowSignature` are defined with the jump engine
+    // below; these helpers are only invoked at runtime, long after evaluation.
+    // -------------------------------------------------------------------------
+    // rAF with timeout fallback: rAF never fires in hidden tabs, which wedged
+    // isScanning=true forever once the 30s backstop was removed. Module-scope so
+    // C7 AND the window helpers below can use it.
+    const nextFrame = () => new Promise((resolve) => {
+        let settled = false;
+        const done = () => { if (!settled) { settled = true; resolve(); } };
+        try {
+            requestAnimationFrame(() => requestAnimationFrame(done));
+        } catch (e) { done(); }
+        setTimeout(done, 500);
+    });
+
+    /** Min/max turn number mounted in the ACTIVE thread; null when unavailable. */
+    const mountedTurnRange = () => {
+        const turns = (window.TOC.dom && window.TOC.dom.activeTurns) ? window.TOC.dom.activeTurns() : [];
+        let min = null;
+        let max = null;
+        for (const t of turns) {
+            const n = turnNumberFromEl(t);
+            if (n === null) continue;
+            if (min === null || n < min) min = n;
+            if (max === null || n > max) max = n;
+        }
+        return (min === null) ? null : { min, max };
+    };
+
+    /** Resolve as soon as the mounted window changes (or after timeoutMs). */
+    const waitForWindowChange = async (prevSig, timeoutMs) => {
+        // No window signal (legacy UI or a non-ChatGPT platform): fall back to the
+        // previous short rAF + sleep so other sites keep their original timing.
+        if (!prevSig) {
+            await nextFrame();
+            await nextFrame();
+            await new Promise(r => setTimeout(r, 50));
+            return false;
+        }
+        const deadline = performance.now() + (timeoutMs || 260);
+        while (performance.now() < deadline) {
+            await nextFrame();
+            if (windowSignature() !== prevSig) return true;
+            await new Promise(r => setTimeout(r, 20));
+        }
+        return false;
+    };
+
+    // -------------------------------------------------------------------------
     // C7: Scroll Scanner (All platforms, replaces Refresh)
     // -------------------------------------------------------------------------
     // Drop C1 placeholder stubs ("Prompt N") that a full C7 scroll never
@@ -637,16 +754,7 @@ window.TOC.Virtual = (function () {
         const STALL_TIMEOUT_MS = 25000;
         const MAX_SCAN_TIME_MS = 300000;
 
-        // rAF with timeout fallback: rAF never fires in hidden tabs, which
-        // wedged isScanning=true forever once the 30s backstop was removed.
-        const nextFrame = () => new Promise((resolve) => {
-            let settled = false;
-            const done = () => { if (!settled) { settled = true; resolve(); } };
-            try {
-                requestAnimationFrame(() => requestAnimationFrame(done));
-            } catch (e) { done(); }
-            setTimeout(done, 500);
-        });
+        // nextFrame() is defined at module scope (shared with the window helpers).
 
         const scan = async (site, onProgress, onComplete, session) => {
             if (isScanning) {
@@ -696,11 +804,22 @@ window.TOC.Virtual = (function () {
             console.log(`[TOC C7] Starting scan for ${siteKey}, virtualized: ${virtualized}, height: ${container.scrollHeight}, viewport: ${container.clientHeight}`);
 
             // UUID-anchor save (Trap 8)
+            const S = window.TOC.scroll;
             let savedAnchorId = null;
             let savedAnchorIndex = null;
+            // Track the LOGICAL position (0 = oldest) so restore works in both
+            // layouts — the native scrollTop is negative on the new UI.
+            let savedTop = 0;
             try {
-                const viewportCenter = container.scrollTop + container.clientHeight / 2;
-                const turns = document.querySelectorAll(SELECTORS.chatgpt.turnContainer);
+                savedTop = S ? S.getLogical(container) : container.scrollTop;
+                const viewportCenter = savedTop + container.clientHeight / 2;
+                const turnSel = document.querySelector(SELECTORS.chatgpt.turnContainerNew)
+                    ? SELECTORS.chatgpt.turnContainerNew
+                    : SELECTORS.chatgpt.turnContainer;
+                // New UI: scope to the active conversation's turns (never document-wide)
+                const turns = (turnSel === SELECTORS.chatgpt.turnContainerNew && window.TOC.dom && window.TOC.dom.activeTurns)
+                    ? window.TOC.dom.activeTurns()
+                    : document.querySelectorAll(turnSel);
                 let closest = null;
                 let closestDist = Infinity;
                 turns.forEach(turn => {
@@ -712,7 +831,9 @@ window.TOC.Virtual = (function () {
                     }
                 });
                 if (closest) {
-                    savedAnchorId = closest.getAttribute(SELECTORS.chatgpt.turnIdAttr) || closest.getAttribute('data-testid');
+                    savedAnchorId = closest.getAttribute(SELECTORS.chatgpt.turnKeyAttr)
+                        || closest.getAttribute(SELECTORS.chatgpt.turnIdAttr)
+                        || closest.getAttribute('data-testid');
                     const idxAttr = closest.getAttribute('data-testid')?.match(/(\d+)/)?.[1];
                     if (idxAttr) savedAnchorIndex = parseInt(idxAttr, 10) - 1;
                     console.log(`[TOC C7] Saved anchor: ${savedAnchorId} at index ${savedAnchorIndex}`);
@@ -732,8 +853,10 @@ window.TOC.Virtual = (function () {
                 if (onProgress) onProgress({ step: 0, total: 1, found: totalFound, isSmall: true });
                 // Restore anchor (no scroll needed, but ensure visible)
                 if (savedAnchorId) {
-                    const el = document.querySelector(`[data-turn-id="${savedAnchorId}"]`);
-                    if (el) el.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    const el = document.querySelector(`[data-turn-key="${savedAnchorId}"]`)
+                        || document.querySelector(`[data-turn-id="${savedAnchorId}"]`);
+                    if (el && S) S.scrollByElement(container, el, 'center');
+                    else if (el) el.scrollIntoView({ behavior: 'instant', block: 'center' });
                 }
                 isScanning = false;
                 isPaused = false;
@@ -758,8 +881,14 @@ window.TOC.Virtual = (function () {
             }
 
             // Large chat path: incremental scroll
-            const savedTop = container.scrollTop;
-            const scrollStep = Math.floor(container.clientHeight * 0.85);
+            // v1.9.2: adaptive step — starts at 0.85 viewport, grows while the mounted
+            // windows overlap, and backs off (rewind + rescan) the moment a coverage
+            // gap appears. Falls back to a fixed step when turn numbers are unknown.
+            let stepRatio = 0.85;
+            const MIN_STEP_RATIO = 0.5;
+            const MAX_STEP_RATIO = 1.5;
+            let stepGapUndos = 0;
+            let lastMaxTurn = null;
             const maxSteps = 500;
             let staleCount = 0;
             const MAX_STALE = 15;
@@ -782,8 +911,10 @@ window.TOC.Virtual = (function () {
             document.addEventListener('visibilitychange', handleVisibility);
 
             try {
-                // Scroll to top — wait longer for virtualization to render first turns
-                container.scrollTo({ top: 0, behavior: 'instant' });
+                // Scroll to top (oldest) — logical 0, not native 0 (new UI is
+                // column-reverse where native 0 is the NEWEST message).
+                if (S) S.setLogical(container, 0);
+                else container.scrollTo({ top: 0, behavior: 'instant' });
                 await nextFrame();
                 await nextFrame();
                 await new Promise(r => setTimeout(r, 300));
@@ -791,13 +922,6 @@ window.TOC.Virtual = (function () {
                 if (scanSession && !isCurrentSession(scanSession)) return;
                 let added = C6.scanCurrent(siteKey, scanSession);
                 totalFound += added;
-                // Bars often mount only after the first scroll forces layout:
-                // index them now so subsequent C6 passes match via promptBarIndexMap.
-                try {
-                    if (siteKey === 'chatgpt' && document.querySelectorAll(SELECTORS.chatgpt.promptBar).length > 0) {
-                        C1.scan(scanSession);
-                    }
-                } catch (e) { /* ignore */ }
                 if (onProgress) onProgress({ step: 0, total: maxSteps, found: store.getUserMessages().length });
 
                 // Incremental scroll
@@ -814,10 +938,12 @@ window.TOC.Virtual = (function () {
                     const beforeHeight = container.scrollHeight;
                     const beforeCount = store.size();
 
-                    container.scrollTo({ top: beforeTop + scrollStep, behavior: 'instant' });
-                    await nextFrame();
-                    await nextFrame();
-                    await new Promise(r => setTimeout(r, 50));
+                    const scrollStep = Math.floor(container.clientHeight * stepRatio);
+                    const sigBefore = windowSignature();
+                    S.setLogical(container, S.getLogical(container) + scrollStep);
+                    // Event-driven wait: proceed as soon as the virtualizer swaps the
+                    // mounted window (typically 1–3 frames) instead of a fixed sleep.
+                    await waitForWindowChange(sigBefore, 260);
                     if (scanGen !== myGen || scanAbort) break;
                     if (scanSession && !isCurrentSession(scanSession)) break;
 
@@ -831,6 +957,25 @@ window.TOC.Virtual = (function () {
                     // Fix: Progress counts user only, not total (avoid 484 double count)
                     const userFound = store.getUserMessages().length;
                     if (onProgress) onProgress({ step: steps, total: maxSteps, found: userFound, scrollTop: afterTop });
+
+                    // Coverage validation (v1.9.2): consecutive windows must overlap.
+                    // When a gap is detected, rewind one step, shrink the step and let
+                    // the next iteration rescan that span. Bounded by stepGapUndos.
+                    const range = mountedTurnRange();
+                    if (range) {
+                        if (lastMaxTurn !== null && range.min > lastMaxTurn && stepGapUndos < 6) {
+                            console.log(`[TOC C7] Coverage gap (min ${range.min} > last max ${lastMaxTurn}) — rewinding`);
+                            S.setLogical(container, S.getLogical(container) - scrollStep);
+                            stepRatio = Math.max(MIN_STEP_RATIO, stepRatio * 0.6);
+                            stepGapUndos++;
+                            lastMaxTurn = null; // re-establish after the rescan
+                            continue;
+                        }
+                        if (lastMaxTurn !== null) {
+                            stepRatio = Math.min(MAX_STEP_RATIO, stepRatio * 1.08);
+                        }
+                        lastMaxTurn = range.max;
+                    }
 
                     // Stall watchdog: abort only if neither scroll position nor store
                     // advanced for STALL_TIMEOUT_MS. Frozen while tab hidden.
@@ -866,7 +1011,7 @@ window.TOC.Virtual = (function () {
                     // Check if at bottom — settle first: React virtualizer uses
                     // estimated placeholder heights, so scrollHeight can expand
                     // after measuring real content (36k -> 66k observed live).
-                    if (afterTop >= container.scrollHeight - container.clientHeight - 10) {
+                    if (S.getLogical(container) >= S.maxTop(container) - 10) {
                         await new Promise(r => setTimeout(r, 250));
                         if (scanGen !== myGen || scanAbort) break;
                         if (scanSession && !isCurrentSession(scanSession)) break;
@@ -888,7 +1033,7 @@ window.TOC.Virtual = (function () {
 
                 // Final capture at bottom — also re-scan top to catch any missed first turns
                 if (scanGen === myGen && !scanAbort && (!scanSession || isCurrentSession(scanSession))) {
-                    container.scrollTo({ top: container.scrollHeight, behavior: 'instant' });
+                    S.setLogical(container, S.maxTop(container));
                     await new Promise(r => setTimeout(r, 200));
                     if (scanGen !== myGen || scanAbort) return;
                     if (scanSession && !isCurrentSession(scanSession)) return;
@@ -897,7 +1042,8 @@ window.TOC.Virtual = (function () {
                 }
                 // Re-scan top: virtualization may have hidden first turns during bottom scroll
                 if (scanGen === myGen && !scanAbort && (!scanSession || isCurrentSession(scanSession))) {
-                    container.scrollTo({ top: 0, behavior: 'instant' });
+                    if (S) S.setLogical(container, 0);
+                    else container.scrollTo({ top: 0, behavior: 'instant' });
                     await nextFrame();
                     await new Promise(r => setTimeout(r, 300));
                     if (scanGen !== myGen || scanAbort) return;
@@ -914,13 +1060,6 @@ window.TOC.Virtual = (function () {
                 // Stale real-uuid deletions are corrected by the next full C3 refresh.
                 try {
                     if (scanGen === myGen && !scanAbort && (!scanSession || isCurrentSession(scanSession))) {
-                        // Final bar indexing: bars mounted mid-scan get merged into
-                        // existing C6 entries via promptBarIndexMap (no duplicates).
-                        try {
-                            if (siteKey === 'chatgpt' && document.querySelectorAll(SELECTORS.chatgpt.promptBar).length > 0) {
-                                C1.scan(scanSession);
-                            }
-                        } catch (e) { /* ignore */ }
                         pruneStalePlaceholders(store);
                         store.isFullyScanned = true;
                         if (StoreManager && typeof StoreManager.save === 'function' && scanConvId) {
@@ -935,22 +1074,31 @@ window.TOC.Virtual = (function () {
                 document.removeEventListener('visibilitychange', handleVisibility);
                 // Restore by UUID (Trap 8)
                 if (savedAnchorId) {
-                    const anchorEl = document.querySelector(`[data-turn-id="${savedAnchorId}"]`);
-                    if (anchorEl) {
+                    const anchorEl = document.querySelector(`[data-turn-key="${savedAnchorId}"]`)
+                        || document.querySelector(`[data-turn-id="${savedAnchorId}"]`);
+                    if (anchorEl && S) {
                         console.log(`[TOC C7] Restoring anchor ${savedAnchorId}`);
+                        S.scrollByElement(container, anchorEl, 'center');
+                    } else if (anchorEl) {
                         anchorEl.scrollIntoView({ behavior: 'instant', block: 'center' });
                     } else if (savedAnchorIndex !== null) {
-                        // Fallback to prompt bar (LIVE: [data-toc-item-index], not aria-label)
+                        // Fallback to prompt bar (legacy UI only)
                         const bar = document.querySelector(`[data-toc-item-index="${savedAnchorIndex}"]`);
                         if (bar) {
                             console.log(`[TOC C7] Anchor not in DOM, clicking bar ${savedAnchorIndex}`);
                             bar.click();
+                        } else if (S) {
+                            S.setLogical(container, savedTop);
                         } else {
                             container.scrollTo({ top: savedTop, behavior: 'instant' });
                         }
+                    } else if (S) {
+                        S.setLogical(container, savedTop);
                     } else {
                         container.scrollTo({ top: savedTop, behavior: 'instant' });
                     }
+                } else if (S) {
+                    S.setLogical(container, savedTop);
                 } else {
                     container.scrollTo({ top: savedTop, behavior: 'instant' });
                 }
@@ -984,6 +1132,381 @@ window.TOC.Virtual = (function () {
     })();
 
     // -------------------------------------------------------------------------
+    // Virtual-jump engine (new UI) — v1.9.2
+    //
+    // Shaped after GPT-Conversation-Toolkit's `virtualized-jump` flow, reduced to
+    // what the DOM actually exposes here:
+    //   1. fast path          — target already mounted → centre + flash
+    //   2. ratio jump         — exact API branch position (apiIndex/apiTotal)
+    //   3. directional search — uses the MOUNTED window's api indices to pick the
+    //                           direction, overshoots when the window is stuck,
+    //                           refines with smaller steps late
+    //   4. verify             — by turn key / message id (never by offset guess)
+    // Cancels the moment the user scrolls or types, so it never fights input.
+    // -------------------------------------------------------------------------
+    let activeJumpToken = 0;
+
+    const JUMP = {
+        maxAttempts: 60,
+        largeStep: 0.85,   // × viewport, matches the C7 scan step
+        smallStep: 0.25,   // × viewport, late refinement
+        overshoot: 1.4,    // × step when the mounted window refuses to change
+        pollMs: 60,
+        verifyMs: 1200,
+        stepWaitMs: 260,
+        deadlineMs: 12000, // hard wall-clock budget for one navigation
+    };
+
+    /** Turn index embedded in the unit key: "fallback-turn-7:0:user" → 7. */
+    const turnNumberFromEl = (turnEl) => {
+        try {
+            const sel = SELECTORS.chatgpt.unitKeyAttr;
+            const unit = turnEl.querySelector(`[${sel}]`);
+            const key = unit && unit.getAttribute(sel);
+            const m = key && key.match(/turn-(\d+)/i);
+            return m ? parseInt(m[1], 10) : null;
+        } catch (e) {
+            return null;
+        }
+    };
+
+    /** Cheap fingerprint of the mounted turn window (change detection). */
+    const windowSignature = () => {
+        const turns = (window.TOC.dom && window.TOC.dom.activeTurns) ? window.TOC.dom.activeTurns() : [];
+        if (turns.length === 0) return '';
+        const first = turns[0].getAttribute(SELECTORS.chatgpt.turnKeyAttr) || '';
+        const last = turns[turns.length - 1].getAttribute(SELECTORS.chatgpt.turnKeyAttr) || '';
+        let minTurn = null;
+        let maxTurn = null;
+        for (const t of turns) {
+            const n = turnNumberFromEl(t);
+            if (n === null) continue;
+            if (minTurn === null || n < minTurn) minTurn = n;
+            if (maxTurn === null || n > maxTurn) maxTurn = n;
+        }
+        return `${turns.length}|${first}|${last}|${minTurn === null ? '' : minTurn}:${maxTurn === null ? '' : maxTurn}`;
+    };
+
+    /** Store records for the currently mounted turns (apiIndex + ordinal). */
+    const mountedRecords = (store) => {
+        const out = [];
+        const turns = (window.TOC.dom && window.TOC.dom.activeTurns) ? window.TOC.dom.activeTurns() : [];
+        if (turns.length === 0) return out;
+        let all = [];
+        try { all = store.getAll(); } catch (e) { all = []; }
+        for (const t of turns) {
+            const key = t.getAttribute(SELECTORS.chatgpt.turnKeyAttr);
+            if (!key) continue;
+            // PRIMARY (no store record required): resolve the turn's API position
+            // straight from its DOM ids via C3's published table. Mounted turns are
+            // often absent from the store (C6 only adds what it scanned), and the
+            // DOM's own turn numbers are local to the render window — they restart
+            // at 0 — so ids are the only globally-ordered signal available.
+            let domPosition = null;
+            try {
+                const ids = [key];
+                const unit = t.querySelector(`[${SELECTORS.chatgpt.unitKeyAttr}$=":user"]`);
+                const raw = unit && unit.getAttribute(SELECTORS.chatgpt.unitMsgIdsAttr);
+                if (raw) raw.trim().split(/\s+/).forEach(x => { if (x) ids.push(x); });
+                for (const id of ids) {
+                    const p = (typeof store.positionOfId === 'function') ? store.positionOfId(id) : null;
+                    if (typeof p === 'number') { domPosition = p; break; }
+                }
+            } catch (e) { /* ignore */ }
+            // Prefer a candidate that actually carries an apiIndex — the same turn can
+            // have more than one record if a previous merge failed to de-duplicate.
+            const byTurn = all.filter(m => m.turnId === key);
+            let rec = byTurn.find(m => typeof m.apiIndex === 'number') || byTurn[0] || null;
+            if (!rec) {
+                try {
+                    const unit2 = t.querySelector(`[${SELECTORS.chatgpt.unitKeyAttr}$=":user"]`);
+                    const raw2 = unit2 && unit2.getAttribute(SELECTORS.chatgpt.unitMsgIdsAttr);
+                    const id = raw2 ? raw2.trim().split(/\s+/)[0] : null;
+                    if (id) {
+                        const cand = [store.getById(id)]
+                            .concat(all.filter(m => m.messageId === id))
+                            .filter(Boolean);
+                        rec = cand.find(m => typeof m.apiIndex === 'number') || cand[0] || null;
+                    }
+                } catch (e) { /* ignore */ }
+            }
+            out.push({
+                key,
+                rec,
+                domPosition,
+                ordinal: rec ? all.indexOf(rec) : -1,
+                turnNumber: turnNumberFromEl(t),
+            });
+        }
+        return out;
+    };
+
+    /**
+     * Resolve + scroll + flash. Returns true only when a mounted element was
+     * verified — never when a scroll merely happened.
+     */
+    const performVirtualJump = async (msg, container, store) => {
+        const S = window.TOC.scroll;
+        if (!S || !container || !msg) return false;
+        const myToken = ++activeJumpToken;
+        const stillActive = () => myToken === activeJumpToken;
+        const t0 = performance.now();
+        // Aborts are logged so a silent "not reachable" can always be told apart
+        // from a real search failure.
+        const abort = (why) => {
+            console.warn(`[TOC Nav] Aborted (${why}) after ${(performance.now() - t0).toFixed(0)}ms`);
+            return false;
+        };
+
+        // User intent cancels the jump instantly (never fight manual scrolling).
+        let cancelled = false;
+        const cancel = () => { cancelled = true; };
+        const cancelEvents = ['wheel', 'touchstart', 'pointerdown'];
+        const cancelOpts = { passive: true, capture: true };
+        const cancelKeys = () => { cancelled = true; };
+        cancelEvents.forEach(ev => window.addEventListener(ev, cancel, cancelOpts));
+        window.addEventListener('keydown', cancelKeys, true);
+        const cleanup = () => {
+            cancelEvents.forEach(ev => window.removeEventListener(ev, cancel, cancelOpts));
+            window.removeEventListener('keydown', cancelKeys, true);
+        };
+
+        // Scope lookups to the ACTIVE thread: the outgoing chat's turns stay
+        // mounted for a while during a swap and must never be matched.
+        //
+        // Matching order: DOM turn key → message id (legacy attrs) → the per-unit
+        // search registry → TEXT fingerprint. The last fallback exists because a
+        // record's ids can disagree with the live DOM (id scheme changes, records
+        // merged from the API before the turn ever mounted). Live evidence: a middle
+        // row could sit inside the mounted window yet never match by id.
+        const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const needle = norm(msg.text).slice(0, 48);
+        const byText = () => {
+            if (needle.length < 12) return null;
+            const turns = (window.TOC.dom && window.TOC.dom.activeTurns) ? window.TOC.dom.activeTurns() : [];
+            const sel = (msg.role === 'assistant')
+                ? SELECTORS.chatgpt.assistantMessageNew
+                : SELECTORS.chatgpt.userMessageNew;
+            for (const t of turns) {
+                const node = t.querySelector(sel);
+                if (!node) continue;
+                const text = norm(node.textContent);
+                if (text.slice(0, needle.length) === needle) return t;
+            }
+            return null;
+        };
+        const findEl = (m) => {
+            try {
+                if (m.turnId) {
+                    const el = container.querySelector(`[data-turn-key="${m.turnId}"]`);
+                    if (el) return el;
+                }
+                if (m.messageId) {
+                    const el = container.querySelector(`[data-message-id="${m.messageId}"]`);
+                    if (el) return el;
+                    const unit = container.querySelector(`[${SELECTORS.chatgpt.unitMsgIdsAttr}*="${m.messageId}"]`);
+                    if (unit) return unit.closest('[data-turn-key]') || unit;
+                }
+            } catch (e) { /* malformed id — fall through to text */ }
+            return byText();
+        };
+
+        const waitFor = async (m, timeoutMs) => {
+            const deadline = performance.now() + (timeoutMs || JUMP.verifyMs);
+            while (!cancelled && stillActive() && performance.now() < deadline) {
+                const el = findEl(m);
+                if (el) return el;
+                await new Promise(r => setTimeout(r, JUMP.pollMs));
+            }
+            return findEl(m);
+        };
+
+        const flash = (el) => {
+            try {
+                el.classList.add('toc-nav-target');
+                setTimeout(() => { try { el.classList.remove('toc-nav-target'); } catch (e) { /* ignore */ } }, 1600);
+            } catch (e) { /* ignore */ }
+        };
+
+        const finish = (el) => {
+            if (!el) return false;
+            try { S.scrollByElement(container, el, 'center'); } catch (e) { /* ignore */ }
+            flash(el);
+            console.log(`[TOC Nav] Resolved ${msg.id} in ${(performance.now() - t0).toFixed(0)}ms`);
+            return true;
+        };
+
+        try {
+            // 1. Fast path — already mounted.
+            let el = findEl(msg);
+            if (el) return finish(el);
+
+            const vh = container.clientHeight || 600;
+            const total = (typeof store.apiTotal === 'number' && store.apiTotal > 1) ? store.apiTotal : null;
+            const hasApi = (typeof msg.apiIndex === 'number') && !!total;
+
+            // 2. Exact ratio jump from the API branch position.
+            if (hasApi) {
+                const ratio = Math.min(1, Math.max(0, msg.apiIndex / (total - 1)));
+                console.log(`[TOC Nav] Ratio jump ${(ratio * 100).toFixed(1)}% (apiIndex ${msg.apiIndex}/${total})`);
+                S.setLogical(container, S.maxTop(container) * ratio);
+                el = await waitFor(msg, JUMP.verifyMs);
+                if (el) return finish(el);
+            }
+            if (cancelled) return abort('user-scroll');
+            if (!stillActive()) return abort('superseded');
+
+            // 3. Coarse jump from cached geometry (a previous scan).
+            if (typeof msg.offsetTop === 'number' && msg.offsetTop > 0) {
+                S.setLogical(container, msg.offsetTop);
+                el = await waitFor(msg, JUMP.verifyMs);
+                if (el) return finish(el);
+            }
+            if (cancelled) return abort('user-scroll');
+            if (!stillActive()) return abort('superseded');
+
+            // 4. Directional search with window feedback.
+            let lastSig = '';
+            let stuck = 0;
+            let momentum = -1; // no API signal → sweep older first
+            for (let attempt = 1; attempt <= JUMP.maxAttempts; attempt++) {
+                if (cancelled) return abort('user-scroll');
+                if (!stillActive()) return abort('superseded');
+
+                const sig = windowSignature();
+                if (sig && sig === lastSig) stuck++;
+                else { stuck = 0; lastSig = sig; }
+
+                // Direction: prefer exact API indices; fall back to STORE ORDINALS,
+                // which work even when C6-only records carry no apiIndex (live
+                // evidence: the give-up diagnostic showed window=[?,?], i.e. the
+                // search had no signal at all and simply drifted).
+                let all = [];
+                try { all = store.getAll(); } catch (e) { all = []; }
+                const recs = mountedRecords(store);
+                let direction = 0;
+                let windowRange = null;
+                // Window position: DOM-resolved position first (works without a store
+                // record), then a record's apiIndex as a fallback.
+                const positions = recs
+                    .map(r => (typeof r.domPosition === 'number') ? r.domPosition
+                        : (r.rec && typeof r.rec.apiIndex === 'number') ? r.rec.apiIndex : null)
+                    .filter(v => v !== null && v !== undefined);
+                if (hasApi && positions.length > 0) {
+                    const min = Math.min(...positions);
+                    const max = Math.max(...positions);
+                    windowRange = { min, max };
+                    if (msg.apiIndex < min) direction = -1;       // target is older
+                    else if (msg.apiIndex > max) direction = 1;   // target is newer
+                }
+                if (direction === 0) {
+                    const ords = recs.map(r => r.ordinal).filter(o => o >= 0);
+                    const targetOrd = all.findIndex(m => m.id === msg.id);
+                    if (ords.length > 0 && targetOrd >= 0) {
+                        const minO = Math.min(...ords);
+                        const maxO = Math.max(...ords);
+                        if (targetOrd < minO) direction = -1;
+                        else if (targetOrd > maxO) direction = 1;
+                    }
+                }
+                if (direction === 0 && typeof msg.turnNumber === 'number') {
+                    // Last resort: DOM turn numbers, which are always present on the
+                    // mounted turns and ordered — no store resolution required.
+                    const range = mountedTurnRange();
+                    if (range) {
+                        if (msg.turnNumber < range.min) direction = -1;
+                        else if (msg.turnNumber > range.max) direction = 1;
+                    }
+                }
+                if (direction === 0) {
+                    // Inside the mounted window but not matched, or no API signal:
+                    // keep sweeping the SAME way first, and only reverse once the
+                    // window has refused to change twice (prevents oscillation).
+                    direction = (stuck >= 2) ? -momentum : momentum;
+                }
+                momentum = direction;
+
+                // Distance-aware stride: big steps while the target is far in API
+                // index space, small steps once it is within ~1 window. Without a
+                // known index, keep the large step (the old behaviour).
+                let distance = null;
+                if (windowRange) {
+                    distance = (msg.apiIndex < windowRange.min)
+                        ? (windowRange.min - msg.apiIndex)
+                        : (msg.apiIndex > windowRange.max ? (msg.apiIndex - windowRange.max) : 0);
+                }
+                let baseStep = JUMP.largeStep;
+                if (distance !== null && distance <= 12) baseStep = JUMP.smallStep;
+                else if (distance !== null && distance > 24) baseStep = JUMP.largeStep * JUMP.overshoot;
+                const step = (stuck > 1 ? baseStep * JUMP.overshoot : baseStep) * vh;
+
+                const sigBefore = windowSignature();
+                // Travel with a RELATIVE DOM operation: scroll the window's leading
+                // edge element to the opposite side, which moves the viewport one full
+                // step in the wanted direction. Absolute scroll math was cancelled by
+                // the virtualizer's growing height estimate (scrollHeight grew
+                // 15k → 27k mid-navigation) — setLogical() steps produced no net
+                // movement, which is why the search stalled at the same window.
+                let travelled = false;
+                try {
+                    const recsNow = mountedRecords(store).filter(r => typeof r.domPosition === 'number');
+                    if (recsNow.length > 0) {
+                        const pick = (direction < 0)
+                            ? recsNow.reduce((a, b) => (a.domPosition <= b.domPosition ? a : b))
+                            : recsNow.reduce((a, b) => (a.domPosition >= b.domPosition ? a : b));
+                        const boundaryEl = container.querySelector(`[data-turn-key="${pick.key}"]`);
+                        if (boundaryEl) {
+                            boundaryEl.scrollIntoView({
+                                behavior: 'instant',
+                                block: direction < 0 ? 'end' : 'start',
+                            });
+                            travelled = true;
+                        }
+                    }
+                } catch (e) { /* fall back to offset math */ }
+                if (!travelled) {
+                    S.setLogical(container, S.getLogical(container) + direction * step);
+                }
+                // Wait for the virtualizer to actually swap its window (bounded), then
+                // look for the target. Absolute scroll math is unreliable on this
+                // scroller: scrollHeight is an ESTIMATE that grows as turns get
+                // measured (15k → 50k → 101k observed live), so the only dependable
+                // strategy is to travel in bounded steps and verify each window.
+                await waitForWindowChange(sigBefore, JUMP.stepWaitMs);
+                el = await waitFor(msg, 150);
+                if (el) return finish(el);
+                if (performance.now() - t0 > JUMP.deadlineMs) {
+                    console.warn('[TOC Nav] Time budget exhausted');
+                    break;
+                }
+            }
+
+            // Diagnostics make a stuck jump debuggable from the console alone
+            // (window range vs target index vs scroll position).
+            let diag = '';
+            try {
+                const recs = mountedRecords(store);
+                const idx = recs
+                    .map(r => (typeof r.domPosition === 'number') ? r.domPosition
+                        : (r.rec && typeof r.rec.apiIndex === 'number') ? r.rec.apiIndex : null)
+                    .filter(v => v !== null && v !== undefined);
+                const ords = recs.map(r => r.ordinal).filter(o => o >= 0);
+                const targetOrd = store.getAll().findIndex(m => m.id === msg.id);
+                diag = ` window=[${idx.length ? Math.min(...idx) : '?'},${idx.length ? Math.max(...idx) : '?'}]`
+                    + ` ordinalWindow=[${ords.length ? Math.min(...ords) : '?'},${ords.length ? Math.max(...ords) : '?'}]`
+                    + ` target=${typeof msg.apiIndex === 'number' ? msg.apiIndex : '?'}`
+                    + ` targetOrdinal=${targetOrd}`
+                    + ` mounted=${recs.length}`
+                    + ` logical=${Math.round(S.getLogical(container))}/${Math.round(S.maxTop(container))}`;
+            } catch (e) { /* ignore */ }
+            console.warn(`[TOC Nav] (new UI) Gave up on ${msg.id} after ${JUMP.maxAttempts} attempts —${diag}`);
+            return false;
+        } finally {
+            cleanup();
+        }
+    };
+
+    // -------------------------------------------------------------------------
     // Navigator (Trap 2) — 2-step with adaptive wait
     // -------------------------------------------------------------------------
     const Navigator = {
@@ -1015,7 +1538,44 @@ window.TOC.Virtual = (function () {
             const key = siteKey || 'chatgpt';
             const container = findScrollContainer(key);
 
+            // Resolve a mounted element for a store record across both UIs.
+            const findMsgElement = (m) => {
+                const sels = [];
+                if (m.turnId) sels.push(`[data-turn-key="${m.turnId}"]`);
+                if (m.messageId) sels.push(`[data-message-id="${m.messageId}"]`);
+                if (m.turnId) sels.push(`[data-turn-id="${m.turnId}"]`);
+                for (const s of sels) {
+                    try { const el = document.querySelector(s); if (el) return el; } catch (e) { /* ignore */ }
+                }
+                return null;
+            };
+            const waitForMsgElement = async (m, timeout) => {
+                const deadline = performance.now() + (timeout || 800);
+                while (performance.now() < deadline) {
+                    const el = findMsgElement(m);
+                    if (el) return el;
+                    await new Promise(r => requestAnimationFrame(r));
+                }
+                return findMsgElement(m);
+            };
+
             if (key === 'chatgpt') {
+                // -----------------------------------------------------------------
+                // NEW UI (2026-10): prompt bars are gone and the thread is a
+                // column-reverse virtual scroller. Delegate to the virtual-jump
+                // engine (ratio jump + directional search + verification).
+                // -----------------------------------------------------------------
+                const S = window.TOC.scroll;
+                const newUI = !!(S && document.querySelector(SELECTORS.chatgpt.turnContainerNew));
+                if (newUI) {
+                    const ok = await performVirtualJump(msg, container, store);
+                    if (!ok) console.warn(`[TOC Nav] (new UI) Message ${storeId} not reachable`);
+                    return ok;
+                }
+
+                // -----------------------------------------------------------------
+                // LEGACY UI
+                // -----------------------------------------------------------------
                 // ChatGPT: use prompt bars for user, 2-step for assistant.
                 // barIdx derivation: stored promptBarIndex first, then turnNumber
                 // parity ((n-1)/2 for odd user turns), then sequence position.
@@ -1179,7 +1739,9 @@ window.TOC.Virtual = (function () {
             try {
                 const adapter = safeAdapter();
                 if (adapter) {
-                    const items = await adapter.get({ experimentalAPI: false });
+                    // v1.9.2: default TRUE — the API is the primary outline source on
+                    // the redesigned UI. Stored `false` is an explicit opt-out.
+                    const items = await adapter.get({ experimentalAPI: true });
                     return { experimentalAPI: !!(items && items.experimentalAPI) };
                 }
             } catch (e) { /* fall through */ }
@@ -1187,30 +1749,36 @@ window.TOC.Virtual = (function () {
                 try {
                     const api = (typeof chrome !== 'undefined' && chrome.storage) ? chrome.storage.local
                         : (typeof browser !== 'undefined' && browser.storage) ? browser.storage.local : null;
-                    if (!api) return resolve({ experimentalAPI: false });
-                    const maybePromise = api.get({ experimentalAPI: false });
+                    if (!api) return resolve({ experimentalAPI: true });
+                    const maybePromise = api.get({ experimentalAPI: true });
                     if (maybePromise && typeof maybePromise.then === 'function') {
                         maybePromise.then(
                             items => resolve({ experimentalAPI: !!(items && items.experimentalAPI) }),
-                            () => resolve({ experimentalAPI: false })
+                            () => resolve({ experimentalAPI: true })
                         );
                         return;
                     }
-                    api.get({ experimentalAPI: false }, items => resolve({ experimentalAPI: !!(items && items.experimentalAPI) }));
+                    api.get({ experimentalAPI: true }, items => resolve({ experimentalAPI: !!(items && items.experimentalAPI) }));
                 } catch (e) {
-                    resolve({ experimentalAPI: false });
+                    resolve({ experimentalAPI: true });
                 }
             });
         };
 
+        // v1.9.2: API-first is the DEFAULT. The 2026-10 redesign removed the prompt
+        // bars, so the conversation API is the only complete, instant outline
+        // source; the toggle is now an opt-OUT (only an explicit `false` disables).
         const isEnabled = async () => {
-            const isShare = Identity.isShared();
-            if (isShare) {
+            if (Identity.isShared()) {
                 console.log('[TOC C3] Auto-enabled for /share/');
                 return true;
             }
             const { experimentalAPI } = await getSetting();
-            return !!experimentalAPI;
+            if (experimentalAPI === false) {
+                console.log('[TOC C3] Disabled by setting (experimentalAPI=false)');
+                return false;
+            }
+            return true;
         };
 
         const extractToken = () => {
@@ -1236,6 +1804,108 @@ window.TOC.Virtual = (function () {
                 }
             } catch (e) { console.debug('[TOC C3] Session fetch failed', e); }
             return null;
+        };
+
+        // ---------------------------------------------------------------------
+        // v1.9.2 hardening (ports from GPT-Conversation-Toolkit's conversation-api)
+        // ---------------------------------------------------------------------
+        const FETCH_TIMEOUT_MS = 10000; // never let a hung request stall init
+        const MAX_PAGES = 5;            // bounded pagination for mega-chats
+
+        const fetchWithTimeout = async (url, options, timeoutMs) => {
+            const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
+            let timer = null;
+            if (ctl) {
+                timer = setTimeout(() => { try { ctl.abort(); } catch (e) { /* ignore */ } }, timeoutMs || FETCH_TIMEOUT_MS);
+            }
+            try {
+                const opts = { ...(options || {}) };
+                if (ctl) opts.signal = ctl.signal;
+                return await fetch(url, opts);
+            } finally {
+                if (timer) clearTimeout(timer);
+            }
+        };
+
+        /**
+         * A truncated mapping (partial response) looks like a short conversation.
+         * Walk current_node → parent to the root: if any hop is missing the
+         * response is incomplete and must not replace/seed the outline.
+         */
+        const isCompleteMapping = (mapping, currentNode) => {
+            if (!mapping || typeof mapping !== 'object') return false;
+            let id = currentNode || '';
+            if (!id) {
+                for (const [k, node] of Object.entries(mapping)) {
+                    if (node && node.current) { id = k; break; }
+                }
+            }
+            if (!id || !mapping[id]) return false;
+            const seen = new Set();
+            let steps = 0;
+            while (id) {
+                if (seen.has(id) || !mapping[id]) return false;
+                seen.add(id);
+                id = mapping[id].parent || '';
+                if (++steps > 10000) return false;
+            }
+            return true;
+        };
+
+        /**
+         * Bounded pagination fallback (mega-chats): the paginated endpoint returns
+         * newest-first chunks; each older page is fetched with `before=<cursor>`
+         * and prepended. Returns oldest→newest, or null when unavailable.
+         */
+        const fetchPaginatedMessages = async (convId) => {
+            let token = await resolveToken();
+            if (!token) return null;
+            let all = [];
+            let cursor = '';
+            for (let page = 0; page < MAX_PAGES; page++) {
+                const qs = `?num_turns=100&include_has_versions=true${cursor ? `&before=${encodeURIComponent(cursor)}` : ''}`;
+                let res;
+                try {
+                    res = await fetchWithTimeout(apiUrl(`/backend-api/conversations/${convId}/messages${qs}`), {
+                        credentials: 'include',
+                        headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+                    });
+                } catch (e) { break; }
+                if (!res || !res.ok) break;
+                let json = null;
+                try { json = await res.json(); } catch (e) { break; }
+                const pageMessages = Array.isArray(json && json.messages) ? json.messages : null;
+                if (!pageMessages || pageMessages.length === 0) break;
+                const seen = new Set(all.map(m => m && m.id));
+                const older = pageMessages.filter(m => m && m.id && !seen.has(m.id));
+                all = older.concat(all); // older pages go in front → oldest first
+                const info = (json && (json.page_info || json.pageInfo)) || {};
+                const hasPrev = info.has_previous_page === true || info.hasPreviousPage === true;
+                const nextCursor = info.start_cursor || info.startCursor || '';
+                if (!hasPrev || typeof nextCursor !== 'string' || !nextCursor) break;
+                cursor = nextCursor;
+            }
+            if (all.length === 0) return null;
+            // Pages are assumed oldest-first per chunk; when every message carries
+            // create_time, sort ascending as a normalization safety net.
+            if (all.every(m => m && typeof m.create_time === 'number')) {
+                all = all.slice().sort((a, b) => a.create_time - b.create_time);
+            }
+            console.log(`[TOC C3] Paginated fallback produced ${all.length} messages`);
+            return all.map((msg) => {
+                const parts = (msg.content && Array.isArray(msg.content.parts)) ? msg.content.parts : [];
+                const textParts = parts.filter(p => typeof p === 'string');
+                return {
+                    id: msg.id,
+                    role: (msg.author && msg.author.role) || 'unknown',
+                    text: textParts.join('\n'),
+                    createTime: msg.create_time,
+                    turnId: msg.id,
+                    messageId: msg.id,
+                    isVisible: !(msg.metadata && msg.metadata.is_visually_hidden_from_conversation === true),
+                    isUserSystemMessage: !!(msg.metadata && msg.metadata.is_user_system_message === true),
+                };
+            });
         };
 
         // Resolve a Bearer token for the current session only: cached value
@@ -1330,7 +2000,7 @@ window.TOC.Virtual = (function () {
         const fetchConversation = async () => {
             const enabled = await isEnabled();
             if (!enabled) {
-                console.log('[TOC C3] Disabled (toggle OFF and not /share/)');
+                // isEnabled() already logged the specific reason.
                 return null;
             }
             const url = location.href;
@@ -1350,54 +2020,87 @@ window.TOC.Virtual = (function () {
             }
 
             try {
-                let res;
+                let data = null;
                 if (shareId) {
                     console.log(`[TOC C3] Fetching /share/${shareId}`);
-                    res = await fetch(apiUrl(`/backend-api/share/${shareId}`), {
-                        credentials: 'include',
-                        headers: { Accept: 'application/json' },
-                    });
+                    try {
+                        const res = await fetchWithTimeout(apiUrl(`/backend-api/share/${shareId}`), {
+                            credentials: 'include',
+                            headers: { Accept: 'application/json' },
+                        });
+                        if (res && res.ok) data = await res.json();
+                        else console.warn(`[TOC C3] Share fetch failed: ${res && res.status}`);
+                    } catch (e) { console.warn('[TOC C3] Share fetch error', e); }
                 } else {
-                    // Logged-in conversation: Bearer token required (opt-in via toggle).
+                    // Logged-in conversation: Bearer token required.
+                    // Two endpoint candidates + completeness validation; the token
+                    // is refreshed once on 401. A bounded paginated request is the
+                    // last resort (mega-chats / partial responses).
+                    // Order matters: the plain endpoint is the one ChatGPT's own UI
+                    // uses and it answered 200 in ~3 s live, while the
+                    // `include_full_conversation=true` variant returned 403 for this
+                    // account — so it is kept only as a secondary candidate.
+                    const candidates = [
+                        apiUrl(`/backend-api/conversation/${convId}`),
+                        apiUrl(`/backend-api/conversation/${convId}?include_full_conversation=true`),
+                    ];
                     let token = await resolveToken();
-                    if (!token) {
-                        console.warn('[TOC C3] No token available for /c/ fetch');
-                        return null;
-                    }
-                    console.log(`[TOC C3] Fetching /conversation/${convId} with token`);
-                    res = await fetch(apiUrl(`/backend-api/conversation/${convId}`), {
-                        credentials: 'include',
-                        headers: {
-                            Accept: 'application/json',
-                            Authorization: `Bearer ${token}`,
-                        },
-                    });
-                    if (res.status === 401) {
-                        // Token expired: drop the cached token, fetch fresh once.
-                        console.log('[TOC C3] 401, retrying with fresh token');
-                        clearCachedToken();
-                        token = await fetchSessionToken();
-                        if (token) {
-                            cachedToken = token;
-                            try { cachedTokenAt = Date.now(); } catch (e) { /* ignore */ }
-                            res = await fetch(apiUrl(`/backend-api/conversation/${convId}`), {
+                    for (const url of candidates) {
+                        if (!token) { console.warn('[TOC C3] No token available for /c/ fetch'); break; }
+                        let res = null;
+                        try {
+                            console.log(`[TOC C3] Fetching /backend-api/conversation/${convId}`);
+                            res = await fetchWithTimeout(url, {
                                 credentials: 'include',
-                                headers: {
-                                    Accept: 'application/json',
-                                    Authorization: `Bearer ${token}`,
-                                },
+                                headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
                             });
-                        } else {
+                        } catch (e) { console.warn('[TOC C3] Fetch error', e); continue; }
+                        if (res && res.status === 401) {
+                            console.log('[TOC C3] 401, refreshing token once');
                             clearCachedToken();
+                            token = await fetchSessionToken();
+                            if (token) {
+                                cachedToken = token;
+                                try { cachedTokenAt = Date.now(); } catch (e) { /* ignore */ }
+                                try {
+                                    res = await fetchWithTimeout(url, {
+                                        credentials: 'include',
+                                        headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+                                    });
+                                } catch (e) { continue; }
+                            }
                         }
+                        if (!res || !res.ok) {
+                            console.warn(`[TOC C3] Candidate failed: ${res && res.status}`);
+                            continue;
+                        }
+                        let json = null;
+                        try { json = await res.json(); } catch (e) { continue; }
+                        const mapping = json && (json.mapping || (json.conversation && json.conversation.mapping));
+                        const cur = json && (json.current_node || json.current_node_id
+                            || (json.conversation && (json.conversation.current_node || json.conversation.current_node_id)));
+                        if (mapping && !isCompleteMapping(mapping, cur)) {
+                            console.warn('[TOC C3] Incomplete mapping, trying next candidate');
+                            continue;
+                        }
+                        data = json;
+                        break;
+                    }
+                    if (!data) {
+                        console.log('[TOC C3] Falling back to paginated messages endpoint');
+                        const paginated = await fetchPaginatedMessages(convId);
+                        if (paginated) {
+                            paginated.forEach((m, i) => { m.apiIndex = i; });
+                            try { paginated.apiTotal = paginated.length; } catch (e) { /* ignore */ }
+                            console.log(`[TOC C3] Final ${paginated.length} messages with content (paginated)`);
+                            return paginated;
+                        }
+                        console.warn('[TOC C3] No usable conversation data');
+                        return null;
                     }
                 }
 
-                if (!res || !res.ok) {
-                    console.warn(`[TOC C3] Fetch failed: ${res?.status}`);
-                    return null;
-                }
-                const data = await res.json();
+                if (!data) return null;
                 console.log(`[TOC C3] Fetched ${JSON.stringify(Object.keys(data)).slice(0, 100)}`);
 
                 // Parse
@@ -1450,9 +2153,29 @@ window.TOC.Virtual = (function () {
                     console.log(`[TOC C3] Parsed ${messages.length} from data.messages`);
                 }
 
+                // NEW UI (v1.9.2): record each message's position in the API branch.
+                // The Navigator's ratio jump depends on it. Indices are assigned
+                // BEFORE the empty/system filter so they stay conversation-accurate;
+                // the pre-filter count rides along as `apiTotal` so the ratio
+                // DENOMINATOR matches that index space. Mixing the filtered count with
+                // unfiltered indices made every ratio jump overshoot (live: apiIndex
+                // 239 with total 84 → a 100% jump for a mid-conversation message).
+                const fullTotal = messages.length;
+                // id → position map for the WHOLE chain. Row-creation below skips
+                // hidden/system messages, but navigation still needs their position:
+                // C6 finds them in the DOM and keys them by these ids, so without the
+                // map those records stay position-less and the Navigator drifts
+                // (live: window=[?,?] target=142 mounted=5).
+                const indexById = new Map();
+                messages.forEach((m, i) => {
+                    m.apiIndex = i;
+                    if (m.id) indexById.set(m.id, i);
+                });
                 // Filter out empty and system hidden
                 messages = messages.filter(m => m.text && m.text.trim().length > 0);
-                console.log(`[TOC C3] Final ${messages.length} messages with content`);
+                try { messages.apiTotal = fullTotal; } catch (e) { /* ignore */ }
+                try { messages.indexById = indexById; } catch (e) { /* ignore */ }
+                console.log(`[TOC C3] Final ${messages.length} of ${fullTotal} messages with content`);
                 return messages;
 
             } catch (e) {
@@ -1503,6 +2226,37 @@ window.TOC.Virtual = (function () {
                 });
                 if (eligible.length === 0) return 0;
                 store.mergeC3Data(eligible);
+                // Stamp the exact API position on EVERY record that exists in the
+                // chain — including records the row-merge deliberately skips
+                // (hidden/system user context that C6 still sees in the DOM). Row
+                // creation and position stamping are separate concerns: without this,
+                // DOM-keyed records carry no apiIndex and both direction signals fail.
+                try {
+                    const indexById = messages.indexById;
+                    if (indexById && typeof indexById.get === 'function') {
+                        // Publish so every record added/updated LATER (C6 scan, C7)
+                        // is stamped automatically — the reason the list order used to
+                        // break after a scan.
+                        if (typeof store.setChainIndex === 'function') store.setChainIndex(indexById);
+                        for (const rec of store.getAll()) {
+                            let idx = null;
+                            if (rec.id && indexById.has(rec.id)) idx = indexById.get(rec.id);
+                            else if (rec.messageId && indexById.has(rec.messageId)) idx = indexById.get(rec.messageId);
+                            if (idx !== null && idx !== undefined && rec.apiIndex !== idx) {
+                                store.update(rec.id, { apiIndex: idx });
+                            }
+                        }
+                        // Re-sort: the merge above sorted BEFORE these positions were
+                        // known, so freshly stamped records would keep a heuristic slot.
+                        try { store.sort(); } catch (e) { /* ignore */ }
+                    }
+                } catch (e) { /* never break the TOC */ }
+                // Ratio-jump denominator: the FULL API branch length (pre-filter), which
+                // shares the same index space as each message's apiIndex. Using the
+                // filtered count here made every ratio jump overshoot.
+                store.apiTotal = (typeof messages.apiTotal === 'number' && messages.apiTotal > 0)
+                    ? messages.apiTotal
+                    : messages.length;
                 store.isFullyScanned = true;
                 console.log(`[TOC C3] Merged ${eligible.length} messages, store now ${store.size()}`);
                 // Persist full C3 completion (StorageManager skips when disabled/non-ChatGPT)
@@ -1527,6 +2281,9 @@ window.TOC.Virtual = (function () {
     try {
         Identity.onUrlChange(() => {
             currentNavGen++;
+            // Cancel any in-flight navigation: a 12 s jump must never keep scrolling
+            // (or flash a highlight) in the PREVIOUS conversation's thread.
+            activeJumpToken++;
             try {
                 if (StoreManager && typeof StoreManager.cancelPendingSave === 'function') {
                     StoreManager.cancelPendingSave();
@@ -1540,7 +2297,6 @@ window.TOC.Virtual = (function () {
     // Public API
     // -------------------------------------------------------------------------
     return {
-        C1,
         C6,
         C7,
         Navigator,
@@ -1585,12 +2341,6 @@ window.TOC.Virtual = (function () {
                 }
             } catch (e) { /* cache miss is normal */ }
 
-            if (!isCurrentSession(session)) return;
-
-            // 2. C1 for ChatGPT long chats (provisional)
-            if (siteKey === 'chatgpt') {
-                try { C1.scan(session); } catch (e) { /* ignore */ }
-            }
             if (!isCurrentSession(session)) return;
 
             // 3. C6 always-on (provisional saves wired inside C6)

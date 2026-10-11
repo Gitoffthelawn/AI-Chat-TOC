@@ -5,7 +5,7 @@
 A browser extension that adds a **Table of Contents** sidebar to AI chat interfaces. Never lose track of your conversation again!
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.9.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   <img src="https://img.shields.io/badge/platforms-5-orange" alt="Platforms">
   <a href="https://github.com/sponsors/harshmann10"><img src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=githubsponsors" alt="Sponsor"></a>
@@ -110,11 +110,23 @@ Long AI conversations (especially on ChatGPT) use **DOM virtualization**, where 
 
 - 🎨 **Modern Glassmorphic Export Menu:** Redesigned with frosted glass backdrop blur, clean SVG icons (Text, Markdown, File downloads), and instant <kbd>Escape</kbd> dismissal.
 - 💫 **Reactive Ambient Glow:** Soft radial feedback on settings changes and chat scans that reliably re-triggers even on rapid successive clicks without visual stutter.
-- 🔍 **Live Search Count & Empty States:** Real-time `X of Y queries` counter, centered *"No matching queries"* placeholder, and instant <kbd>Escape</kbd> search clearing.
+- 🔍 **Live Search Count & Empty States:** Real-time `X of Y queries` counter, centered _"No matching queries"_ placeholder, and instant <kbd>Escape</kbd> search clearing.
 - 🔄 **GPU-Accelerated Morphing:** Smooth panel collapse/expand powered by GPU `transform` and `opacity` with zero layout thrashing or scroll stutter.
 - 🪟 **Cross-Browser Scrollbars:** Standardized thin custom scrollbars (`scrollbar-width: thin`) across sidebar lists, compact popovers, and answer previews on Firefox and Chromium.
-- 🏷️ **Dynamic Shortcut Tooltips:** Context-aware toggle titles update dynamically between *"Collapse Table of Contents"* and *"Expand Table of Contents"*.
+- 🏷️ **Dynamic Shortcut Tooltips:** Context-aware toggle titles update dynamically between _"Collapse Table of Contents"_ and _"Expand Table of Contents"_.
 - 🚀 **Automated GitHub Release Pipeline:** Integrated GitHub Actions workflow to build, verify, and publish releases with production-ready `chrome.zip` and `firefox.zip` bundles.
+
+### 🩹 ChatGPT New UI Compatibility (v1.9.2)
+
+ChatGPT rolled out a redesigned conversation view that changed the DOM contract, the scroll model, **and removed its own prompt-navigation UI**. This release restores the TOC and upgrades how outlines are built and navigated.
+
+- 🧩 **New DOM Contract Support:** Turns are now keyed by a stable UUID wrapper with dedicated user-bubble and assistant-markdown containers, replacing the old `conversation-turn` markup. Both layouts are supported so a staged rollout or rollback keeps working.
+- 🔃 **Reverse-Scroll Handling:** The new thread is a `column-reverse` scroller whose `scrollTop` runs from `0` (newest) down to `-maxTop` (oldest). Positive offsets are silently ignored by the browser — which made every scroll, scan and jump silently do nothing. A direction-agnostic scroll layer now drives both layouts through one logical axis.
+- 🛰️ **API-First Outlines:** The complete conversation is now loaded from ChatGPT's own conversation API — the same data the app itself uses. A full outline arrives in ~3 s instead of ~20 s of scrolling, and it includes messages the page has never mounted. **On by default** (toggle it off in Settings for a DOM-only outline); the scroll Scan stays as the automatic fallback.
+- 🎯 **Smart Message Jump:** Clicking an item now jumps by exact API position, then searches using live feedback from the mounted window — stepping in the correct direction, overshooting when the virtualizer stalls, and verifying the target really mounted before centring it and flashing a highlight. Your own scrolling cancels the jump instantly.
+- 🧭 **Prompt-Bar System Removed:** ChatGPT deleted its prompt bars and hover popover, so the bar-index scanner was deleted as well rather than left running against a dead UI.
+- ⚡ **Faster, Safer Scan:** The scan waits on the virtualizer instead of fixed sleeps, and grows its step size only while consecutive mounted windows overlap — rewinding automatically if a coverage gap ever appears.
+- 🔒 **Stable Cache Keys:** Outline entries keep using ChatGPT's own message UUIDs, so previously cached conversations upgrade in place instead of duplicating.
 
 ---
 

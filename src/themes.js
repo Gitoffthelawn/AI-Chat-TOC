@@ -54,7 +54,7 @@ const DEFAULT_SETTINGS = {
     themes: DEFAULT_THEMES,
     showAnswers: false,
     compactMode: false,
-    experimentalAPI: false, // v1.9.0: C3 backend API (auto for /share/, opt-in for /c/)
+    experimentalAPI: true, // v1.9.2: API-first outline (opt-OUT; auto for /share/)
     cacheEnabled: true // v1.9.0: persistent TOC cache (ChatGPT /c/<id> + /share/<id>)
 };
 

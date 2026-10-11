@@ -1407,7 +1407,6 @@ window.TOC.UI = class UI {
                     } catch (err) { /* ignore */ }
                 };
                 const storeId = link.getAttribute("data-store-id");
-                const promptIdx = link.getAttribute("data-prompt-idx");
                 // Non-ChatGPT platforms: direct DOM navigation (persistent cache
                 // and Virtual.Navigator are ChatGPT-only). Never call the
                 // offset-based navigator here — its container/offsetTop guess
@@ -1423,11 +1422,8 @@ window.TOC.UI = class UI {
                 }
                 if (storeId && window.TOC && window.TOC.Virtual) {
                     let ok = await window.TOC.Virtual.Navigator.navigateTo(storeId, this.config.platformKey);
-                    // Fallback: try prompt bar directly if store lookup failed
-                    if (!ok && promptIdx !== null) {
-                        const bar = document.querySelector(`[data-toc-item-index="${promptIdx}"]`);
-                        if (bar) { bar.click(); ok = true; }
-                    }
+                    // (Prompt-bar click fallback removed in v1.9.2 — ChatGPT deleted
+                    // its prompt-navigation UI entirely, so there is no bar to click.)
                     if (!ok) {
                         const questionId = link.getAttribute("href").substring(1);
                         const targetElement = document.getElementById(questionId);
