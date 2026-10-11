@@ -42,6 +42,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Required: without this the tagged ref is fetched WITHOUT the annotated
+          # tag object, so `git tag --format='%(contents)'` returns the COMMIT
+          # message and the release title/notes fall back to "Release <tag>".
+          fetch-tags: true
 
       - name: Set up Node.js
         uses: actions/setup-node@v4

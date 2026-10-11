@@ -164,6 +164,18 @@ The repository has an automated GitHub Actions pipeline ([`.github/workflows/rel
    git push origin vX.Y.Z
    ```
 
+   > [!IMPORTANT]
+   > **Tag message format is load-bearing** — the release title and body are extracted from it:
+   > 1. **First line must be `vX.Y.Z: Descriptive Title`** (e.g. `v1.9.1: UI Polish, Frosted Glass Export Menu & Smooth Animations`). The workflow only accepts a title whose first line matches `^vX.Y.Z[:\s]` / `^v\d+\.\d+`; anything else falls back to the literal string `Release vX.Y.Z`.
+   > 2. **Write the file with `--cleanup=verbatim`** when using `-F <file>`: Git's default cleanup **strips every line starting with `#`**, which silently deletes a `## What's Changed` heading (and any heading as the first line).
+   > ```bash
+   > git tag -a vX.Y.Z --cleanup=verbatim -F notes.md
+   > ```
+   > 3. The body becomes the release notes (the `**Full Changelog**` footer is appended automatically), so write it in the same style as previous releases: a `## What's Changed in vX.Y.Z` heading followed by emoji bullets.
+   > 4. `actions/checkout` runs with `fetch-tags: true` so the annotated tag object is actually available to the workflow — do not remove it, or the release will fall back to the commit message.
+
+   To fix a release published with the wrong title/body, re-create the tag with the correct message (delete + re-push the tag, or run the workflow manually via **workflow_dispatch** with the `release_title` and `release_notes` inputs). `softprops/action-gh-release` updates an existing release for the same tag.
+
 6. **Automated Pipeline Takes Over**:
    - GitHub Actions detects the `v*` tag.
    - It runs syntax validation and `./build.ps1`.
